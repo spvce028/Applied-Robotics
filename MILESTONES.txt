@@ -1,0 +1,22 @@
+1. Hardware and ROS 2
+ROS 2 is set up, and the DOBOT Magician robot can be controlled via the software. The robot can be initialized and execute movements.
+
+
+2. Basic Functionality and Simulation
+The robot picks up an object from a known position and places it at a predefined location. From now on all the movements should / can be tested in a simulation.
+
+
+3. Movement and Orientation
+The robot can rotate the picked-up objects and position them so that they fit into the container.
+
+
+4. Camera
+The camera detects the objects that the robot needs to pick up. Their positions and sizes are determined, and the collected data is transmitted to the robot. From this point onward, the robot must use the camera to detect the objects independently, as their positions are no longer predefined.
+
+
+5. Verification
+The camera is also used to verify whether an object has been picked up correctly and placed in the container successfully, or whether an error has occurred, for example, because the object is too large to fit into the container.
+
+
+6. Complete System
+The system can process objects autonomously, detect their positions, and identify potential errors
