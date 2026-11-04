@@ -1,11 +1,12 @@
-
+"""Shared data models for the robotic depalletizing project."""
 from dataclasses import dataclass
 from typing import Optional
 
 
 @dataclass
 class RobotPose:
-    """Target pose relative to the robot base.
+    """
+    Target pose relative to the robot base.
 
     Position is measured in millimeters.
     Rotation r is measured in degrees.

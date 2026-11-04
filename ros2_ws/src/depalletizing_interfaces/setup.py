@@ -1,3 +1,4 @@
+"""Setup configuration for the depalletizing_interfaces ROS 2 package."""
 from setuptools import find_packages, setup
 
 package_name = 'depalletizing_interfaces'
