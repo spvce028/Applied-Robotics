@@ -87,7 +87,39 @@ The following Python function signatures are supported by the mocks:
 
 These are synchronous mock interfaces. Real ROS 2 action clients may require asynchronous execution and additional handling for timeouts or cancellation.
 
-## 4. Build Instructions
+## 4. Waypoint Sequence Execution
+
+`WaypointExecutor` executes `RobotPose` objects sequentially using:
+
+```python
+move_to(pose: RobotPose) -> OperationResult
+```
+
+`move_to()` must return only after success, failure, timeout, rejection, or cancellation.
+
+### Example
+
+```python
+from depalletizing_interfaces import RobotPose, WaypointExecutor
+from depalletizing_interfaces.mocks import MockRobot
+
+robot = MockRobot()
+executor = WaypointExecutor(robot.move_to)
+
+poses = [
+    RobotPose(100, 0, 50, 0),
+    RobotPose(150, 0, 50, 0),
+    RobotPose(200, 0, 50, 0),
+]
+
+result = executor.move_through_waypoints(poses)
+```
+
+The executor processes poses in order, waits for each movement to finish, and stops after failure or cancellation. It returns success for an empty sequence.
+
+Active-movement cancellation must be handled by `move_to()`. Tests use a mocked `move_to()` and require neither Gazebo nor a physical robot.
+
+## 5. Build Instructions
 
 Run from the repository root:
 
@@ -98,16 +130,16 @@ colcon build --packages-select depalletizing_interfaces --symlink-install
 source install/setup.bash
 ```
 
-## 5. Run Automated Tests
+## 6. Run Automated Tests
 
 ```bash
-colcon test --packages-select depalletizing_interfaces --pytest-args -k test_shared
+colcon test --packages-select depalletizing_interfaces
 colcon test-result --verbose
 ```
 
-Initial verification: 7 tests passed, 0 failures.
+Latest verification: 18 tests, 0 errors, 0 failures, 1 skipped.
 
-## 6. Integration Notes
+## 7. Integration Notes
 
 All team members should use the same coordinate conventions and shared result types.
 
