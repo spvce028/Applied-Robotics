@@ -1,3 +1,4 @@
+"""Setup configuration for the depalletizing_pick_place ROS 2 package."""
 from setuptools import find_packages, setup
 
 package_name = 'depalletizing_pick_place'
@@ -15,12 +16,15 @@ setup(
     zip_safe=True,
     maintainer='robotics',
     maintainer_email='robotics@todo.todo',
-    description='Pick-and-place primitives and execution nodes for depalletizing robot.',
+    description='Pick and place operations for the depalletizing robot',
     license='Apache-2.0',
-    tests_require=['pytest'],
+    extras_require={
+        'test': [
+            'pytest',
+        ],
+    },
     entry_points={
         'console_scripts': [
-            'depalletizing_node = depalletizing_pick_place.main_node:main',
         ],
     },
 )

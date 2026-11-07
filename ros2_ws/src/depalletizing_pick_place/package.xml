@@ -3,6 +3,7 @@
 <package format="3">
   <name>depalletizing_pick_place</name>
   <version>0.0.0</version>
+<<<<<<< HEAD
   <description>Pick-and-place primitives and execution nodes for depalletizing robot.</description>
   <maintainer email="robotics@todo.todo">robotics</maintainer>
   <license>Apache-2.0</license>
@@ -15,9 +16,21 @@
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
   <test_depend>ament_pep257</test_depend>
+=======
+  <description>Pick and place operations for the depalletizing robot</description>
+  <maintainer email="robotics@todo.todo">robotics</maintainer>
+  <license>Apache-2.0</license>
+
+  <exec_depend>depalletizing_interfaces</exec_depend>
+
+>>>>>>> 39f32e786d7450ef12f498efb0f18a02be3e7cc5
   <test_depend>python3-pytest</test_depend>
 
   <export>
     <build_type>ament_python</build_type>
   </export>
+<<<<<<< HEAD
 </package>
+=======
+</package>
+>>>>>>> 39f32e786d7450ef12f498efb0f18a02be3e7cc5
