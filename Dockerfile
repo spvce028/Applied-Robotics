@@ -33,6 +33,9 @@ RUN groupadd --gid $USER_GID $USERNAME \
 # Für Zugriff zu USB
 RUN usermod -aG dialout,plugdev $USERNAME
 
+# Workspace kopieren und Rechte an den User übergeben
+COPY --chown=$USERNAME:$USERNAME ros2_ws /home/$USERNAME/ros2_ws
+
 # Switch zu User
 USER $USERNAME
 WORKDIR /home/$USERNAME
