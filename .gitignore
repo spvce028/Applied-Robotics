@@ -223,3 +223,9 @@ __marimo__/
 ros2_ws/build/
 ros2_ws/install/
 ros2_ws/log/
+
+# Ignore external dependencies
+ros2_ws/src/magician_ros2/
+ros2_ws/build/
+ros2_ws/install/
+ros2_ws/log/

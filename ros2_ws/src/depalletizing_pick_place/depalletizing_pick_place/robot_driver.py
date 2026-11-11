@@ -94,6 +94,7 @@ class DobotActionRobot:
                 )
             )
 
+        rclpy.spin_until_future_complete(self.node, result_future)
         return result_future
 
     def _goal_response_callback(self, future, result_future):

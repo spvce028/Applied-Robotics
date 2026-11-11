@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     wget \
     curl \
+    build-essential \
     python3-pip \
     python3-colcon-common-extensions \
     ros-dev-tools \
@@ -41,6 +42,7 @@ USER $USERNAME
 WORKDIR /home/$USERNAME
 
 # Automatically source ROS 2 in every bash shell for user
-RUN echo "source /opt/ros/humble/setup.bash" >> ~/.bashrc
+RUN echo "source /opt/ros/humble/setup.bash" >> ~/.bashrc \
+    && echo "if [ -f /home/$USERNAME/ros2_ws/install/setup.bash ]; then source /home/$USERNAME/ros2_ws/install/setup.bash; fi" >> ~/.bashrc
 
 CMD ["bash"]

@@ -25,6 +25,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
+            'depalletizing_node = depalletizing_pick_place.main_node:main',
         ],
     },
 )
