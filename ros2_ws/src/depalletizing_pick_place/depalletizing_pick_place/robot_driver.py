@@ -12,7 +12,7 @@ from depalletizing_interfaces.models import RobotPose, OperationResult
 
 class DobotActionRobot:
     """
-    Asynchronous ROS 2 Action Client wrapper for the Dobot Magician.
+    Synchronous ROS 2 Action Client wrapper for the Dobot Magician.
     Sends PointToPoint goals and processes acceptance, feedback, 
     and execution results completely asynchronously via futures and callbacks.
     """
@@ -23,6 +23,7 @@ class DobotActionRobot:
         
         self._active_goal_handle = None
         self._goal_pending = False
+        self._lock_future = None
         self.node.get_logger().info("Dobot Action Client initialized.")
 
     def wait_for_server(self, timeout_sec=5.0) -> bool:
@@ -36,33 +37,20 @@ class DobotActionRobot:
             self.node.get_logger().error("Dobot Action Server not available.")
         return available
 
-    def move_to(self, pose: RobotPose, motion_type: int = 1) -> Future:
+    def move_to(self, pose: RobotPose, motion_type: int = 1) -> OperationResult:
         """
-        Send an asynchronous movement goal.
+        Send a movement goal and block until completion, cancellation, or timeout.
         Returns:
-            Future[OperationResult]: Completes when the robot finishes execution.
+            OperationResult: Direct result object evaluated upon motion completion.
         """
-        result_future = Future()
         timeout_sec = 30.0
 
         # Prevent overlapping movement commands.
         if self._goal_pending or self._active_goal_handle is not None:
-            result_future.set_result(
-                OperationResult(
-                    success=False,
-                    message="Another robot movement is already active."
-                )
-            )
-            return result_future
+            return OperationResult(success=False, message="Another robot movement is already active.")
 
         if not self._action_client.server_is_ready():
-            result_future.set_result(
-                OperationResult(
-                    success=False,
-                    message="Dobot Action Server is not available."
-                )
-            )
-            return result_future
+            return OperationResult(success=False, message="Dobot Action Server is not available.")
 
         goal_msg = PointToPoint.Goal()
         goal_msg.motion_type = motion_type
@@ -75,6 +63,46 @@ class DobotActionRobot:
         )
 
         self._goal_pending = True
+        result_future = Future()
+        self._lock_future = result_future
+
+        def goal_response_callback(future):
+            if result_future.done():
+                return  # Already timed out or completed
+            try:
+                goal_handle = future.result()
+            except Exception as exc:
+                self._goal_pending = False
+                result_future.set_result(OperationResult(success=False, message=f"Goal response failed: {exc}"))
+                return
+
+            if not goal_handle.accepted:
+                self._goal_pending = False
+                result_future.set_result(OperationResult(success=False, message="Dobot rejected the movement goal."))
+                return
+
+            self._active_goal_handle = goal_handle
+            get_result_future = goal_handle.get_result_async()
+            get_result_future.add_done_callback(result_callback)
+
+        def result_callback(future):
+            if result_future.done():
+                return  # Already handled (e.g. timeout)
+            self._goal_pending = False
+            self._active_goal_handle = None
+            try:
+                result_wrapped = future.result()
+                status = result_wrapped.status
+                if status == GoalStatus.STATUS_SUCCEEDED:
+                    res = OperationResult(success=True, message="Motion completed successfully.")
+                elif status == GoalStatus.STATUS_CANCELED:
+                    res = OperationResult(success=False, message="Motion was canceled.")
+                else:
+                    res = OperationResult(success=False, message=f"Motion failed with status: {status}")
+                result_future.set_result(res)
+            except Exception as exc:
+                result_future.set_result(OperationResult(success=False, message=f"Failed to retrieve result: {exc}"))
+
 
         try:
             send_goal_future = self._action_client.send_goal_async(
@@ -82,9 +110,7 @@ class DobotActionRobot:
                 feedback_callback=self._feedback_callback
             )
 
-            send_goal_future.add_done_callback(
-                lambda future: self._goal_response_callback(future, result_future)
-            )
+            send_goal_future.add_done_callback(goal_response_callback)
 
         except Exception as exc:
             self._goal_pending = False
@@ -95,85 +121,32 @@ class DobotActionRobot:
                 )
             )
 
+        # Spin with strict execution timeout guard
         rclpy.spin_until_future_complete(self.node, result_future, timeout_sec=timeout_sec)
 
         # Handle timeout case if execution takes longer than 30 seconds
         if not result_future.done():
+            self.node.get_logger().error("Dobot motion execution timed out after 30 seconds! Cancelling goal...")
             self._goal_pending = False
-            self._active_goal_handle = None
-            result_future.set_result(
-                OperationResult(
-                    success=False,
-                    message="Motion execution timed out after 30 seconds."
-                )
-            )
-            self.node.get_logger().error("Dobot motion execution timed out!")
 
-        return result_future
+            if self._active_goal_handle is not None:
+                try:
+                    cancel_future = self._active_goal_handle.cancel_goal_async()
+                    rclpy.spin_until_future_complete(self.node, cancel_future, timeout_sec=2.0)
+                except Exception as e:
+                    self.node.get_logger().error(f"Failed to cleanly cancel goal: {e}")
+                finally:
+                    self._active_goal_handle = None
 
-    def _goal_response_callback(self, future, result_future):
-        """Handle goal acceptance or rejection."""
-        self._goal_pending = False
-        try:
-            goal_handle = future.result()
-        except Exception as exc:
-            result_future.set_result(
-                OperationResult(success=False, message=f"Goal response failed: {exc}")
-            )
-            return
+            timeout_result = OperationResult(success=False, message="Motion execution timed out after 30 seconds.")
+            result_future.set_result(timeout_result)
 
-        if not goal_handle.accepted:
-            self.node.get_logger().warning("Dobot rejected the movement goal.")
-            result_future.set_result(
-                OperationResult(success=False, message="Dobot rejected the movement goal.")
-            )
-            return
-
-        self.node.get_logger().info("Movement goal accepted. Robot is moving.")
-        self._active_goal_handle = goal_handle
-
-        try:
-            get_result_future = goal_handle.get_result_async()
-            get_result_future.add_done_callback(
-                lambda future: self._result_callback(future, result_future, goal_handle)
-            )
-        except Exception as exc:
-            result_future.set_result(
-                OperationResult(success=False, message=f"Failed to request result: {exc}")
-            )
+        return result_future.result()
 
     def _feedback_callback(self, feedback_msg):
-        """Movement Status Monitoring callback."""
-        self.node.get_logger().debug("Dobot movement feedback received.")
-
-    def _result_callback(self, future, result_future, goal_handle):
-        """Handle the final movement result."""
-        try:
-            result_wrapped = future.result()
-            status = result_wrapped.status
-
-            if status == GoalStatus.STATUS_SUCCEEDED:
-                operation_result = OperationResult(success=True, message="Motion completed successfully.")
-            elif status == GoalStatus.STATUS_CANCELED:
-                operation_result = OperationResult(success=False, message="Motion was canceled.")
-            else:
-                operation_result = OperationResult(success=False, message=f"Motion failed with status: {status}")
-
-            result_future.set_result(operation_result)
-
-        except Exception as exc:
-            result_future.set_result(
-                OperationResult(success=False, message=f"Failed to retrieve result: {exc}")
-            )
-        finally:
-            if self._active_goal_handle is goal_handle:
-                self._active_goal_handle = None
+        pass
 
     def cancel_current_goal(self):
-        """Request cancellation of the currently active movement."""
         if self._active_goal_handle is None:
-            self.node.get_logger().warning("No active movement to cancel.")
             return None
-
-        self.node.get_logger().warning("Requesting Dobot movement cancellation.")
         return self._active_goal_handle.cancel_goal_async()

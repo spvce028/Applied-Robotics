@@ -15,55 +15,57 @@ class DepalletizingMainNode(Node):
     def __init__(self):
         super().__init__('depalletizing_main_node')
         
-        self._workflow_started = False
-        
-        # 1. Initialize drivers
-        self.robot_driver = DobotActionRobot(self)
-        self.robot_driver.wait_for_server(timeout_sec=5.0)
-        self.gripper_driver = DummyGripper() 
+        # Initialize drivers
+        self.robot = DobotActionRobot(self)
+        self.gripper = DummyGripper(self)
+        self.workflow = PickPlaceWorkflow(self.robot, self.gripper, self)
 
-        # 2. Initialize PickPlace logic
-        self.pick_place_logic = PickPlace(
-            robot=self.robot_driver, 
-            gripper=self.gripper_driver
+        # Create an explicit service trigger instead of automatic startup
+        self.start_service = self.create_service(
+            Trigger,
+            '/start_depalletizing',
+            self.handle_start_service
         )
 
-        # 3. Trigger workflow asynchronously using a timer
-        self.create_timer(1.0, self.execute_workflow)
+        self.get_logger().info(
+            "Depalletizing node initialized in IDLE state. "
+            "Call service '/start_depalletizing' to begin workflow."
+        )
 
-    def execute_workflow(self):
-        if self._workflow_started:
-            return
-        self._workflow_started = True
+    def handle_start_service(self, request, response):
+        """Operator-triggered service callback to safely start the workflow."""
+        self.get_logger().info("Received start trigger. Checking server availability...")
+
+        if not self.robot.wait_for_server(timeout_sec=3.0):
+            response.success = False
+            response.message = "Aborted: Dobot Action Server is offline."
+            return response
+
+        self.get_logger().info("Starting pick-and-place workflow sequence...")
         
-        self.get_logger().info("Starting full pick-and-place workflow...")
+        # Execute workflow synchronously in a safe manner
+        success = self.workflow.run_full_workflow()
 
-        # Example poses for pick and place
-        pick_pose = RobotPose(x=200.0, y=0.0, z=50.0, r=0.0, frame_id="base_link")
-        place_pose = RobotPose(x=150.0, y=150.0, z=50.0, r=0.0, frame_id="base_link")
-
-        # Run pick workflow
-        pick_result = self.pick_place_logic.pick_object(pick_pose)
-        if not pick_result.success:
-            self.get_logger().error(f"Pick failed: {pick_result.message}")
-            return
-
-        self.get_logger().info("Pick successful! Executing place operation...")
-
-        # Run place workflow
-        place_result = self.pick_place_logic.place_object(place_pose)
-        if not place_result.success:
-            self.get_logger().error(f"Place failed: {place_result.message}")
-            return
-
-        self.get_logger().info("Full pick-and-place workflow completed successfully!")
+        if success:
+            response.success = True
+            response.message = "Depalletizing workflow completed successfully."
+        else:
+            response.success = False
+            response.message = "Depalletizing workflow failed or was aborted."
+            
+        return response
 
 
 def main(args=None):
     rclpy.init(args=args)
     node = DepalletizingMainNode()
+
+    # Use MultiThreadedExecutor to prevent deadlocks during synchronous waits / service calls
+    executor = MultiThreadedExecutor()
+    executor.add_node(node)
+
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:
