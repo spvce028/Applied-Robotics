@@ -43,6 +43,7 @@ class DobotActionRobot:
             Future[OperationResult]: Completes when the robot finishes execution.
         """
         result_future = Future()
+        timeout_sec = 30.0
 
         # Prevent overlapping movement commands.
         if self._goal_pending or self._active_goal_handle is not None:
@@ -94,7 +95,20 @@ class DobotActionRobot:
                 )
             )
 
-        rclpy.spin_until_future_complete(self.node, result_future)
+        rclpy.spin_until_future_complete(self.node, result_future, timeout_sec=timeout_sec)
+
+        # Handle timeout case if execution takes longer than 30 seconds
+        if not result_future.done():
+            self._goal_pending = False
+            self._active_goal_handle = None
+            result_future.set_result(
+                OperationResult(
+                    success=False,
+                    message="Motion execution timed out after 30 seconds."
+                )
+            )
+            self.node.get_logger().error("Dobot motion execution timed out!")
+
         return result_future
 
     def _goal_response_callback(self, future, result_future):
