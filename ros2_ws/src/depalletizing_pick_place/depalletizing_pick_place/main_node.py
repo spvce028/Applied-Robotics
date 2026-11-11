@@ -1,6 +1,11 @@
 import rclpy
+import threading
+
 from rclpy.node import Node
-from depalletizing_interfaces.models import RobotPose, OperationResult
+from rclpy.executors import MultiThreadedExecutor
+from std_srvs.srv import Trigger
+
+from depalletizing_interfaces.models import OperationResult
 from depalletizing_pick_place.pick_place import PickPlace
 from depalletizing_pick_place.robot_driver import DobotActionRobot
 
@@ -17,8 +22,13 @@ class DepalletizingMainNode(Node):
         
         # Initialize drivers
         self.robot = DobotActionRobot(self)
-        self.gripper = DummyGripper(self)
-        self.workflow = PickPlaceWorkflow(self.robot, self.gripper, self)
+        self.gripper = DummyGripper()
+        self.workflow = PickPlace(self.robot, self.gripper)
+
+        self._workflow_running = False
+        
+
+        self._workflow_lock = threading.Lock()
 
         # Create an explicit service trigger instead of automatic startup
         self.start_service = self.create_service(
@@ -33,28 +43,81 @@ class DepalletizingMainNode(Node):
         )
 
     def handle_start_service(self, request, response):
-        """Operator-triggered service callback to safely start the workflow."""
-        self.get_logger().info("Received start trigger. Checking server availability...")
+        """Accept a workflow request without blocking for its completion."""
 
-        if not self.robot.wait_for_server(timeout_sec=3.0):
+        with self._workflow_lock:
+
+            if self._workflow_running:
+                response.success = False
+                response.message = "A depalletizing workflow is already running."
+                return response
+
+            if self.robot.is_faulted:
+                response.success = False
+                response.message = "Robot driver is faulted. Recovery is required."
+                return response
+
+            if not self.robot.server_is_ready():
+                response.success = False
+                response.message = "Dobot Action Server is unavailable."
+                return response
+
+            self._workflow_running = True
+
+        try:
+            workflow_future = self.workflow.run_full_workflow()
+
+            workflow_future.add_done_callback(
+                self._workflow_done_callback
+            )
+
+        except Exception as exc:
+            with self._workflow_lock:
+                self._workflow_running = False
+
+            self.get_logger().error(
+                f"Could not start workflow: {exc}"
+            )
+
             response.success = False
-            response.message = "Aborted: Dobot Action Server is offline."
+            response.message = f"Workflow could not start: {exc}"
             return response
 
-        self.get_logger().info("Starting pick-and-place workflow sequence...")
-        
-        # Execute workflow synchronously in a safe manner
-        success = self.workflow.run_full_workflow()
+        response.success = True
+        response.message = "Depalletizing workflow accepted and started."
 
-        if success:
-            response.success = True
-            response.message = "Depalletizing workflow completed successfully."
-        else:
-            response.success = False
-            response.message = "Depalletizing workflow failed or was aborted."
-            
+        self.get_logger().info(response.message)
+
         return response
 
+    def _workflow_done_callback(self, future):
+        """Handle completion of the asynchronous workflow."""
+
+        try:
+            result = future.result()
+
+            if not isinstance(result, OperationResult):
+                raise TypeError(
+                    "Workflow must return an OperationResult."
+                )
+
+            if result.success:
+                self.get_logger().info(
+                    f"Workflow completed: {result.message}"
+                )
+            else:
+                self.get_logger().error(
+                    f"Workflow failed: {result.message}"
+                )
+
+        except Exception as exc:
+            self.get_logger().error(
+                f"Workflow completion error: {exc}"
+            )
+
+        finally:
+            with self._workflow_lock:
+                self._workflow_running = False
 
 def main(args=None):
     rclpy.init(args=args)
