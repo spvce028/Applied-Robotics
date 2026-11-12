@@ -1,5 +1,7 @@
 """Tests for pick and place operations using mocked robot and gripper."""
 
+from rclpy.task import Future
+
 from depalletizing_interfaces.mocks import MockGripper, MockRobot
 from depalletizing_interfaces.models import OperationResult, RobotPose
 from depalletizing_pick_place.pick_place import PickPlace
@@ -51,7 +53,7 @@ def test_pick_object_success_sequence():
     pose = make_pose()
     approach = approach_of(pose)
 
-    result = pick_place.pick_object(pose)
+    result = pick_place.pick_object(pose).result()
 
     assert result.success is True
     assert gripper.is_active is True
@@ -67,7 +69,7 @@ def test_place_object_success_sequence():
     pose = make_pose()
     approach = approach_of(pose)
 
-    result = pick_place.place_object(pose)
+    result = pick_place.place_object(pose).result()
 
     assert result.success is True
     assert gripper.is_active is False
@@ -80,7 +82,7 @@ def test_pick_stops_when_approach_fails():
     gripper = MockGripper()
     pick_place = PickPlace(robot, gripper)
 
-    result = pick_place.pick_object(make_pose())
+    result = pick_place.pick_object(make_pose()).result()
 
     assert result.success is False
     assert result.error_code == "MOVE_FAILED"
@@ -96,7 +98,7 @@ def test_pick_stops_when_grasp_move_fails():
     pick_place = PickPlace(robot, gripper)
     pose = make_pose()
 
-    result = pick_place.pick_object(pose)
+    result = pick_place.pick_object(pose).result()
 
     assert result.success is False
     assert result.error_code == "MOVE_FAILED"
@@ -113,7 +115,7 @@ def test_pick_stops_when_gripper_fails():
     pick_place = PickPlace(robot, gripper)
     pose = make_pose()
 
-    result = pick_place.pick_object(pose)
+    result = pick_place.pick_object(pose).result()
 
     assert result.success is False
     assert result.error_code == "GRIPPER_FAILED"
@@ -128,7 +130,7 @@ def test_pick_stops_when_lift_fails():
     pick_place = PickPlace(robot, gripper)
     pose = make_pose()
 
-    result = pick_place.pick_object(pose)
+    result = pick_place.pick_object(pose).result()
 
     assert result.success is False
     assert result.error_code == "MOVE_FAILED"
@@ -144,7 +146,7 @@ def test_place_stops_when_approach_fails():
     gripper.activate_tool()
     pick_place = PickPlace(robot, gripper)
 
-    result = pick_place.place_object(make_pose())
+    result = pick_place.place_object(make_pose()).result()
 
     assert result.success is False
     assert result.error_code == "MOVE_FAILED"
@@ -161,7 +163,7 @@ def test_place_stops_when_placement_move_fails():
     pick_place = PickPlace(robot, gripper)
     pose = make_pose()
 
-    result = pick_place.place_object(pose)
+    result = pick_place.place_object(pose).result()
 
     assert result.success is False
     assert result.error_code == "MOVE_FAILED"
@@ -179,7 +181,7 @@ def test_place_stops_when_gripper_fails():
     pick_place = PickPlace(robot, gripper)
     pose = make_pose()
 
-    result = pick_place.place_object(pose)
+    result = pick_place.place_object(pose).result()
 
     assert result.success is False
     assert result.error_code == "GRIPPER_FAILED"
@@ -195,10 +197,100 @@ def test_place_stops_when_retreat_fails():
     pick_place = PickPlace(robot, gripper)
     pose = make_pose()
 
-    result = pick_place.place_object(pose)
+    result = pick_place.place_object(pose).result()
 
     assert result.success is False
     assert result.error_code == "MOVE_FAILED"
     assert robot.call_count == 3
     assert gripper.is_active is False
     assert robot.movement_history == [approach_of(pose), pose]
+
+
+class AsyncGripper:
+    """Gripper whose commands finish only when the returned Future is set."""
+
+    def __init__(self):
+        self.is_active = False
+        self.pending = None
+
+    def activate_tool(self):
+        self.pending = Future()
+        return self.pending
+
+    def deactivate_tool(self):
+        self.pending = Future()
+        return self.pending
+
+
+def test_pick_waits_for_async_gripper_before_lift():
+    """Do not lift until an asynchronous close command finishes."""
+    robot = MockRobot()
+    gripper = AsyncGripper()
+    pick_place = PickPlace(robot, gripper)
+    pose = make_pose()
+
+    workflow = pick_place.pick_object(pose)
+
+    assert workflow.done() is False
+    assert robot.movement_history == [approach_of(pose), pose]
+    gripper.pending.set_result(OperationResult(success=True, message="closed"))
+
+    assert workflow.result().success is True
+    assert robot.movement_history == [approach_of(pose), pose, approach_of(pose)]
+
+
+def test_pick_does_not_lift_when_async_gripper_fails():
+    """Stop the pick sequence when an asynchronous close command fails."""
+    robot = MockRobot()
+    gripper = AsyncGripper()
+    pick_place = PickPlace(robot, gripper)
+    pose = make_pose()
+
+    workflow = pick_place.pick_object(pose)
+    gripper.pending.set_result(
+        OperationResult(
+            success=False,
+            message="close failed",
+            error_code="GRIPPER_FAILED",
+        )
+    )
+
+    result = workflow.result()
+    assert result.success is False
+    assert result.error_code == "GRIPPER_FAILED"
+    assert robot.movement_history == [approach_of(pose), pose]
+
+
+def test_place_waits_for_async_gripper_before_retreat():
+    """Do not retreat until an asynchronous open command finishes."""
+    robot = MockRobot()
+    gripper = AsyncGripper()
+    gripper.is_active = True
+    pick_place = PickPlace(robot, gripper)
+    pose = make_pose()
+
+    workflow = pick_place.place_object(pose)
+
+    assert workflow.done() is False
+    assert robot.movement_history == [approach_of(pose), pose]
+    gripper.is_active = False
+    gripper.pending.set_result(OperationResult(success=True, message="opened"))
+
+    assert workflow.result().success is True
+    assert robot.movement_history == [approach_of(pose), pose, approach_of(pose)]
+
+
+def test_run_full_workflow_uses_supplied_poses():
+    """Pick and place the poses passed in, not fixed coordinates."""
+    robot = MockRobot()
+    gripper = MockGripper()
+    pick_place = PickPlace(robot, gripper)
+    pick_pose = RobotPose(x=10.0, y=20.0, z=30.0, r=40.0)
+    place_pose = RobotPose(x=11.0, y=21.0, z=31.0, r=41.0)
+
+    result = pick_place.run_full_workflow(pick_pose, place_pose).result()
+
+    assert result.success is True
+    assert robot.movement_history[1] == pick_pose
+    assert robot.movement_history[4] == place_pose
+    assert gripper.is_active is False

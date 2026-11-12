@@ -15,7 +15,7 @@ class PickPlace:
         self.gripper = gripper
 
     def _completed_future(self, result: OperationResult) -> Future:
-        """Wrap synchronous gripper results in a Future."""
+        """Wrap a finished OperationResult in a Future."""
         future = Future()
         future.set_result(result)
         return future
@@ -68,7 +68,7 @@ class PickPlace:
                 return
 
             try:
-                operation_future = steps[index]()
+                operation_future = self._as_future(steps[index])
 
                 operation_future.add_done_callback(
                     lambda future: handle_step_result(future, index)
@@ -126,9 +126,7 @@ class PickPlace:
         steps = [
             lambda: self.robot.move_to(approach_pose),
             lambda: self.robot.move_to(pose),
-            lambda: self._completed_future(
-                self.gripper.activate_tool()
-            ),
+            self.gripper.activate_tool,
             lambda: self.robot.move_to(approach_pose),
         ]
 
@@ -150,9 +148,7 @@ class PickPlace:
         steps = [
             lambda: self.robot.move_to(approach_pose),
             lambda: self.robot.move_to(pose),
-            lambda: self._completed_future(
-                self.gripper.deactivate_tool()
-            ),
+            self.gripper.deactivate_tool,
             lambda: self.robot.move_to(approach_pose),
         ]
 
@@ -161,29 +157,12 @@ class PickPlace:
             "Object placed successfully"
         )
 
-    def run_full_workflow(self) -> Future:
-        """
-        Execute the complete depalletizing workflow asynchronously.
-
-        Replace example coordinates with calibrated poses.
-        """
-
-        pick_pose = RobotPose(
-            x=200.0,
-            y=0.0,
-            z=50.0,
-            r=0.0,
-            frame_id="base_link"
-        )
-
-        place_pose = RobotPose(
-            x=250.0,
-            y=100.0,
-            z=50.0,
-            r=0.0,
-            frame_id="base_link"
-        )
-
+    def run_full_workflow(
+        self,
+        pick_pose: RobotPose,
+        place_pose: RobotPose,
+    ) -> Future:
+        """Pick at pick_pose, then place at place_pose."""
         steps = [
             lambda: self.pick_object(pick_pose),
             lambda: self.place_object(place_pose),
