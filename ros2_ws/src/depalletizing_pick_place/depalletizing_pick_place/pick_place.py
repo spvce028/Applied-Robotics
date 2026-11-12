@@ -9,10 +9,20 @@ from depalletizing_interfaces.models import RobotPose, OperationResult
 class PickPlace:
     """Implement pick and place operations using robot and gripper interfaces."""
 
-    def __init__(self, robot, gripper):
-        """Initialize with robot and gripper instances."""
+    def __init__(self, robot, gripper, approach_height=50.0):
+        """Initialize with robot, gripper, and approach height in millimeters."""
         self.robot = robot
         self.gripper = gripper
+        self.approach_height = approach_height
+
+    @staticmethod
+    def _failed_result(message: str, error_code: str) -> OperationResult:
+        """Build a failed result using a shared error code."""
+        return OperationResult(
+            success=False,
+            message=message,
+            error_code=error_code,
+        )
 
     def _completed_future(self, result: OperationResult) -> Future:
         """Wrap a finished OperationResult in a Future."""
@@ -38,9 +48,9 @@ class PickPlace:
 
         except Exception as exc:
             return self._completed_future(
-                OperationResult(
-                    success=False,
-                    message=f"Operation error: {exc}"
+                self._failed_result(
+                    f"Operation error: {exc}",
+                    "WORKFLOW_ERROR",
                 )
             )
 
@@ -48,8 +58,9 @@ class PickPlace:
         """
         Execute operations sequentially without blocking.
 
-        Each step returns a Future[OperationResult].
+        Each step may return a Future or an OperationResult.
         The next step starts only after the previous one succeeds.
+        Failure, cancellation, and timeout all stop the sequence.
         """
         workflow_future = Future()
 
@@ -76,9 +87,9 @@ class PickPlace:
 
             except Exception as exc:
                 workflow_future.set_result(
-                    OperationResult(
-                        success=False,
-                        message=f"Workflow execution error: {exc}"
+                    self._failed_result(
+                        f"Workflow execution error: {exc}",
+                        "WORKFLOW_ERROR",
                     )
                 )
 
@@ -103,9 +114,9 @@ class PickPlace:
 
             except Exception as exc:
                 workflow_future.set_result(
-                    OperationResult(
-                        success=False,
-                        message=f"Operation failed: {exc}"
+                    self._failed_result(
+                        f"Operation failed: {exc}",
+                        "WORKFLOW_ERROR",
                     )
                 )
 
@@ -113,15 +124,19 @@ class PickPlace:
 
         return workflow_future
 
-    def pick_object(self, pose: RobotPose) -> Future:
-        """Pick an object from the given pose."""
-        approach_pose = RobotPose(
+    def _approach_pose(self, pose: RobotPose) -> RobotPose:
+        """Return the pose used before and after the object pose."""
+        return RobotPose(
             x=pose.x,
             y=pose.y,
-            z=pose.z + 50.0,
+            z=pose.z + self.approach_height,
             r=pose.r,
             frame_id=pose.frame_id,
         )
+
+    def pick_object(self, pose: RobotPose) -> Future:
+        """Pick an object from the given pose."""
+        approach_pose = self._approach_pose(pose)
 
         steps = [
             lambda: self.robot.move_to(approach_pose),
@@ -137,13 +152,7 @@ class PickPlace:
 
     def place_object(self, pose: RobotPose) -> Future:
         """Place an object at the given pose."""
-        approach_pose = RobotPose(
-            x=pose.x,
-            y=pose.y,
-            z=pose.z + 50.0,
-            r=pose.r,
-            frame_id=pose.frame_id,
-        )
+        approach_pose = self._approach_pose(pose)
 
         steps = [
             lambda: self.robot.move_to(approach_pose),
@@ -155,20 +164,4 @@ class PickPlace:
         return self._run_sequence(
             steps,
             "Object placed successfully"
-        )
-
-    def run_full_workflow(
-        self,
-        pick_pose: RobotPose,
-        place_pose: RobotPose,
-    ) -> Future:
-        """Pick at pick_pose, then place at place_pose."""
-        steps = [
-            lambda: self.pick_object(pick_pose),
-            lambda: self.place_object(place_pose),
-        ]
-
-        return self._run_sequence(
-            steps,
-            "Depalletizing workflow completed successfully."
         )
