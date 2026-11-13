@@ -6,6 +6,7 @@ from rclpy.executors import MultiThreadedExecutor
 from std_srvs.srv import Trigger
 
 from depalletizing_interfaces.models import OperationResult, RobotPose
+from depalletizing_interfaces.workflow import PickAndPlaceWorkflow
 from depalletizing_pick_place.pick_place import PickPlace
 from depalletizing_pick_place.robot_driver import DobotActionRobot
 
@@ -23,7 +24,10 @@ class DepalletizingMainNode(Node):
         # Initialize drivers
         self.robot = DobotActionRobot(self)
         self.gripper = DummyGripper()
-        self.workflow = PickPlace(self.robot, self.gripper)
+        self.pick_place = PickPlace(self.robot, self.gripper)
+        self.workflow = PickAndPlaceWorkflow(
+            self.pick_place.pick_object, self.pick_place.place_object,
+        )
 
         self._workflow_running = False
         
@@ -65,11 +69,11 @@ class DepalletizingMainNode(Node):
             self._workflow_running = True
 
         try:
-            # Poses are supplied by the caller. Replace these with
+            # Replace these defaults with
             # configured values once the parameter files exist.
             pick_pose = RobotPose(x=200.0, y=0.0, z=50.0, r=0.0)
             place_pose = RobotPose(x=250.0, y=100.0, z=50.0, r=0.0)
-            workflow_future = self.workflow.run_full_workflow(
+            workflow_future = self.workflow.execute_pick_and_place(
                 pick_pose,
                 place_pose,
             )
