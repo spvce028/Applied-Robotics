@@ -324,7 +324,6 @@ def test_workflow_with_robot_movement_failure():
     assert gripper.is_active is False
 
 
-
 def test_async_operations_wait_and_reject_overlap():
     """Wait for each operation and keep the active workflow status."""
     from rclpy.task import Future
