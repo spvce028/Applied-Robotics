@@ -1,82 +1,116 @@
 import unittest
 
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
+
+from rclpy.task import Future
+
 from dobot_msgs.srv import GripperControl
 from depalletizing_pick_place.gripper_client import GripperClient
-from depalletizing_interfaces.models import OperationResult
 
 class TestGripperClient(unittest.TestCase):
     def setUp(self):
         self.node = Mock()
         self.service = self.node.create_client.return_value
-        self.service.wait_for_service.return_value = True
-        self.future = self.service.call_async.return_value
-        self.future.done.return_value = True
-        self.response = GripperControl.Response()
-        self.response.success = True
-        self.future.result.return_value = self.response
+        self.service.service_is_ready.return_value = True
+        self.service_future = Future()
+        self.service.call_async.return_value = self.service_future
         self.gripper = GripperClient(self.node)
-        spin_patch = patch("depalletizing_pick_place.gripper_client.rclpy.spin_until_future_complete")
-        self.spin = spin_patch.start()
-        self.addCleanup(spin_patch.stop)
 
-    # Checks that activation sends close and returns a successful OperationResult
+    def respond(self, success=True, message=""):
+        service_future = self.service.call_async.return_value
+        service_future.set_result(GripperControl.Response(success=success, message=message))
 
+    # Checks that activation sends close
     def test_activate_tool_sends_close_command(self):
-        response = self.gripper.activate_tool()
-        self.node.create_client.assert_called_once_with(GripperControl, "/dobot_gripper_service")
+        future = self.gripper.activate_tool()
+        self.assertFalse(future.done())
+
         request = self.service.call_async.call_args[0][0]
         self.assertEqual(request.gripper_state, "close")
         self.assertFalse(request.keep_compressor_running)
-        self.assertIsInstance(response, OperationResult)
-        self.assertTrue(response.success)
-        self.assertIsNone(response.error_code)
+        self.assertEqual(self.node.create_timer.call_args[0][0], 5.0)
 
-    # Checks that deactivation sends open and returns a successful OperationResult
-        
+        self.respond(success=True)
+
+        self.assertTrue(future.result().success)
+        self.node.destroy_timer.assert_called_once()
+
+    # Checks that deactivation sends open    
     def test_deactivate_tool_sends_open_command(self):
-        response = self.gripper.deactivate_tool()
-        self.node.create_client.assert_called_once_with(GripperControl, "/dobot_gripper_service")
-        request = self.service.call_async.call_args[0][0]
-        self.assertEqual(request.gripper_state, "open")
-        self.assertFalse(request.keep_compressor_running)
-        self.assertIsInstance(response, OperationResult)
-        self.assertTrue(response.success)
-        self.assertIsNone(response.error_code)
+        future = self.gripper.deactivate_tool()
+        self.assertEqual(self.service.call_async.call_args[0][0].gripper_state, "open")
+
+        self.respond(success=True)
+
+        self.assertTrue(future.result().success)
+
+    # Checks that parameters are taken from constructor
+    def test_constructor(self):
+        gripper = GripperClient(
+            self.node,
+            service_name="/custom",
+            timeout_sec=2.0,
+            keep_compressor_running=True
+        )
+
+        gripper.activate_tool()
+
+        self.node.create_client.assert_called_with(GripperControl, "/custom")
+        self.assertTrue(self.service.call_async.call_args[0][0].keep_compressor_running)
+        self.assertEqual(self.node.create_timer.call_args[0][0], 2.0)
 
     # Checks that no request is sent if the service is unavailable
-
     def test_unavailable_service_no_request(self):
-        self.service.wait_for_service.return_value = False
-        result = self.gripper.activate_tool()
-        self.assertFalse(result.success)
-        self.assertEqual(result.error_code, "GRIPPER_FAILED")
+        self.service.service_is_ready.return_value = False
+
+        future = self.gripper.activate_tool()
+
+        self.assertEqual(future.result().error_code, "GRIPPER_FAILED")
         self.service.call_async.assert_not_called()
 
-    # Checks that a response timeout removes the pending request
-    def test_response_timeout_removes_request(self):
-        self.future.done.return_value = False
-        result = self.gripper.activate_tool()
-        self.assertFalse(result.success)
-        self.assertEqual(result.error_code, "GRIPPER_FAILED")
-        self.spin.assert_called_once_with(self.node, self.future, timeout_sec=5.0)
-        self.service.remove_pending_request.assert_called_once_with(self.future)
-        self.future.result.assert_not_called()
+    # Checks that a rejected response returns GRIPPER_FAILED and keeps the message
+    def test_rejected_response(self):
+        future = self.gripper.activate_tool()
 
-    # Checks that a rejected response keeps the message
-    def test_rejection_keeps_message(self):
-        self.response.success = False
-        self.response.message = "Greiferbefehl abgelehnt"
-        response = self.gripper.activate_tool()
-        self.assertFalse(response.success)
-        self.assertEqual(response.message, "Greiferbefehl abgelehnt")
-        self.assertEqual(response.error_code, "GRIPPER_FAILED")
+        self.respond(success=False, message="Invalid request")
 
-    # Checks that a send error returns a failure
-    def test_send_error_returns_failure(self):
-        self.service.call_async.side_effect = RuntimeError("Service call failed")
-        result = self.gripper.activate_tool()
-        self.assertFalse(result.success)
-        self.assertEqual(result.error_code, "GRIPPER_FAILED")
-        self.assertEqual(result.message, "Service call failed")
-        self.spin.assert_not_called()
+        self.assertEqual(future.result().error_code, "GRIPPER_FAILED")
+        self.assertIn("Invalid request", future.result().message)
+
+    # Checks Exception calls GRIPPER_FAILED
+    def test_service_exception(self):
+        future = self.gripper.activate_tool()
+
+        self.service.call_async.return_value.set_exception(RuntimeError("Service call failed"))
+
+        self.assertEqual(future.result().error_code, "GRIPPER_FAILED")
+
+    # Checks Timeout calls TIMEOUT and blocks commands until response
+    def test_timeout_locks_client(self):
+        future = self.gripper.activate_tool()
+        timeout_callback = self.node.create_timer.call_args[0][1]
+        timeout_callback()
+        self.assertEqual(future.result().error_code, "TIMEOUT")
+
+        blocked = self.gripper.deactivate_tool()
+        self.assertEqual(blocked.result().error_code, "GRIPPER_FAILED")
+
+        self.respond(success=True)
+        self.assertEqual(future.result().error_code, "TIMEOUT")
+
+        self.service.call_async.return_value = Future()
+        self.gripper.deactivate_tool()
+        self.assertEqual(self.service.call_async.call_count, 2)
+
+    # Checks rejection of second command while first is pending
+    def test_reject_second_command_while_pending(self):
+        future1 = self.gripper.activate_tool()
+        future2 = self.gripper.deactivate_tool()
+
+        self.assertEqual(future2.result().error_code, "GRIPPER_FAILED")
+        self.assertFalse(future1.done())
+        self.service.call_async.assert_called_once()
+
+if __name__ == "__main__":
+    unittest.main()
+
