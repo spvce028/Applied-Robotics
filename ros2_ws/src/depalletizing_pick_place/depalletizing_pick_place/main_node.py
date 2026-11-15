@@ -9,12 +9,7 @@ from depalletizing_interfaces.models import OperationResult, RobotPose
 from depalletizing_interfaces.workflow import PickAndPlaceWorkflow
 from depalletizing_pick_place.pick_place import PickPlace
 from depalletizing_pick_place.robot_driver import DobotActionRobot
-
-class DummyGripper:
-    def activate_tool(self):
-        return OperationResult(success=True, message="Gripper activated")
-    def deactivate_tool(self):
-        return OperationResult(success=True, message="Gripper deactivated")
+from depalletizing_pick_place.gripper_client import GripperClient
 
 class DepalletizingMainNode(Node):
 
@@ -23,7 +18,7 @@ class DepalletizingMainNode(Node):
         
         # Initialize drivers
         self.robot = DobotActionRobot(self)
-        self.gripper = DummyGripper()
+        self.gripper = GripperClient(self)
         self.pick_place = PickPlace(self.robot, self.gripper)
         self.workflow = PickAndPlaceWorkflow(
             self.pick_place.pick_object, self.pick_place.place_object,
@@ -64,6 +59,11 @@ class DepalletizingMainNode(Node):
             if not self.robot.server_is_ready():
                 response.success = False
                 response.message = "Dobot Action Server is unavailable."
+                return response
+
+            if not self.gripper.service_is_ready():
+                response.success = False
+                response.message = "Gripper service is unavailable."
                 return response
 
             self._workflow_running = True

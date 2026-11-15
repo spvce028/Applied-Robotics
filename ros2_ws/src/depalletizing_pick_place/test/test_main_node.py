@@ -35,14 +35,25 @@ def test_start_service_runs_async_workflow(fail_pick):
             self.pending = Future()
             return self.pending
 
+    class Gripper:
+        def __init__(self, node):
+            pass
+
+        def service_is_ready(self):
+            return True
+
+        def activate_tool(self):
+            return OperationResult(success=True, message="Gripper activated")
+
+        def deactivate_tool(self):
+            return OperationResult(success=True, message="Gripper deactivated")
+
     rclpy.init()
     executor = SingleThreadedExecutor()
     node = None
     client_node = None
     try:
-        with patch(
-            'depalletizing_pick_place.main_node.DobotActionRobot', Robot,
-        ):
+        with patch('depalletizing_pick_place.main_node.DobotActionRobot', Robot), patch('depalletizing_pick_place.main_node.GripperClient', Gripper):
             node = DepalletizingMainNode()
         client_node = rclpy.create_node('p5_workflow_test_client')
         executor.add_node(node)
@@ -85,3 +96,37 @@ def test_start_service_runs_async_workflow(fail_pick):
         if node is not None:
             node.destroy_node()
         rclpy.shutdown()
+
+def test_start_refused_when_gripper_unavailable():
+    class Robot: 
+        is_faulted = False
+
+        def __init__(self, node):
+            pass
+
+        def server_is_ready(self):
+            return True
+
+    class Gripper:
+        def __init__(self, node):
+            pass
+
+        def service_is_ready(self):
+            return False
+
+    rclpy.init()
+    node = None
+    try:
+        with patch('depalletizing_pick_place.main_node.DobotActionRobot', Robot), patch('depalletizing_pick_place.main_node.GripperClient', Gripper):
+            node = DepalletizingMainNode()
+
+        response = node.handle_start_service(Trigger.Request(), Trigger.Response())
+
+        assert not response.success
+        assert 'Gripper' in response.message
+        assert not node._workflow_running
+    finally:
+        if node is not None:
+            node.destroy_node()
+        rclpy.shutdown()
+    
