@@ -15,7 +15,17 @@ class DepalletizingMainNode(Node):
 
     def __init__(self):
         super().__init__('depalletizing_main_node')
-        
+        # Configurable pick and place positions
+        self.declare_parameter('pick_x', 200.0)
+        self.declare_parameter('pick_y', 0.0)
+        self.declare_parameter('pick_z', 50.0)
+        self.declare_parameter('pick_r', 0.0)
+
+        self.declare_parameter('place_x', 250.0)
+        self.declare_parameter('place_y', 100.0)
+        self.declare_parameter('place_z', 50.0)
+        self.declare_parameter('place_r', 0.0)
+
         # Initialize drivers
         self.robot = DobotActionRobot(self)
         self.gripper = GripperClient(self)
@@ -25,7 +35,7 @@ class DepalletizingMainNode(Node):
         )
 
         self._workflow_running = False
-        
+
 
         self._workflow_lock = threading.Lock()
 
@@ -69,11 +79,24 @@ class DepalletizingMainNode(Node):
             self._workflow_running = True
 
         try:
-            # Replace these defaults with
-            # configured values once the parameter files exist.
-            pick_pose = RobotPose(x=200.0, y=0.0, z=50.0, r=0.0)
-            place_pose = RobotPose(x=250.0, y=100.0, z=50.0, r=0.0)
+
+            # Read pick and place positions from ROS 2 parameters.
+            pick_pose = RobotPose(
+                x=self.get_parameter('pick_x').value,
+                y=self.get_parameter('pick_y').value,
+                z=self.get_parameter('pick_z').value,
+                r=self.get_parameter('pick_r').value,
+            )
+
+            place_pose = RobotPose(
+                x=self.get_parameter('place_x').value,
+                y=self.get_parameter('place_y').value,
+                z=self.get_parameter('place_z').value,
+                r=self.get_parameter('place_r').value,
+            )
+
             workflow_future = self.workflow.execute_pick_and_place(
+
                 pick_pose,
                 place_pose,
             )

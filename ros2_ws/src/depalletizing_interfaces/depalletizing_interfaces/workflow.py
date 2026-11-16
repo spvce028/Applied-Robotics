@@ -11,7 +11,7 @@ from .models import OperationResult, RobotPose
 class PickAndPlaceWorkflow:
     """
     Coordinate operations without blocking the ROS executor.
-    
+
     Operations return a Future containing OperationResult. Direct results are
     accepted for legacy mocks. Cancellation is checked between operations;
     stopping an active physical operation belongs to the robot driver.

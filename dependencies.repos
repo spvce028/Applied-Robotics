@@ -1,0 +1,5 @@
+repositories:
+  magician_ros2:
+    type: git
+    url: https://github.com/jkaniuka/magician_ros2.git
+    version: 6d322f4cc2d752f6bb59c67b4cdb09317a287721

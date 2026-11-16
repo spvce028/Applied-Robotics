@@ -1,0 +1,12 @@
+
+depalletizing_main_node:
+  ros__parameters:
+    pick_x: 200.0
+    pick_y: 0.0
+    pick_z: 50.0
+    pick_r: 0.0
+
+    place_x: 250.0
+    place_y: 100.0
+    place_z: 50.0
+    place_r: 0.0

@@ -268,7 +268,7 @@ def test_move_to_sends_configured_goal():
     assert len(client.goals) == 1
     goal = client.goals[0]
     assert goal.motion_type == 2
-    assert goal.target_pose == [200.0, 10.0, 40.0, 90.0]
+    assert list(goal.target_pose) == [200.0, 10.0, 40.0, 90.0]
     assert goal.velocity_ratio == 0.7
     assert goal.acceleration_ratio == 0.3
     assert node.timers[0].period == 12.0
