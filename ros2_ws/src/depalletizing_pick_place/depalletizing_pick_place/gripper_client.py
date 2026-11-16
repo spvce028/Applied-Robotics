@@ -1,48 +1,103 @@
-# Gripper client for depalletizing pick and place operations
-# sends open and close commands to a service and returns the result
+# Asynchronous Gripper client for depalletizing pick and place operations
 
-import rclpy
-from dobot_msgs.srv import GripperControl
+import threading
+
 from rclpy.node import Node
+from rclpy.task import Future
+
 from depalletizing_interfaces.models import OperationResult
 
+from dobot_msgs.srv import GripperControl
+
+def failed(message: str) -> OperationResult:
+    return OperationResult(success=False, message=message, error_code="GRIPPER_FAILED")
+
+# Sends open and close commands to the gripper
 class GripperClient:
-    def __init__(self, node: Node, service_name: str = "/dobot_gripper_service"):
+    def __init__(
+            self,
+            node: Node,
+            service_name: str = "/dobot_gripper_service",
+            timeout_sec: float = 5.0,
+            keep_compressor_running: bool = False,
+            ):
         self.node = node
-        self.client = node.create_client(GripperControl, service_name)
+        self.timeout_sec = timeout_sec
+        self.keep_compressor_running = keep_compressor_running
 
-    def send_request(self, state, keep_compressor_running):
-        if state not in ("open", "close"):
-            raise ValueError("Invalid Gripper state. Must be 'open' or 'close'")
-        
-        if not self.client.wait_for_service(timeout_sec=5.0):
-            raise ConnectionError("Gripper Service unavailable")
-
-        request = GripperControl.Request()
-        request.gripper_state = state
-        request.keep_compressor_running = keep_compressor_running
-
-        future = self.client.call_async(request)
-        rclpy.spin_until_future_complete(self.node, future, timeout_sec=5.0)
-
-        if not future.done():
-            self.client.remove_pending_request(future)
-            raise TimeoutError("No Gripper Response")
-        
-        return future.result()
-
-    def operate(self, state: str) -> OperationResult:
-        try:
-            response = self.send_request(state, keep_compressor_running = False)
-        except (ConnectionError, TimeoutError, RuntimeError) as error:
-            return OperationResult(success=False, message=str(error), error_code="GRIPPER_FAILED")
-        return OperationResult(success = response.success, message = response.message, error_code=None if response.success else "GRIPPER_FAILED")
-            
-
-    def activate_tool(self) -> OperationResult:
-        return self.operate("close")
-
-    def deactivate_tool(self) -> OperationResult:
-        return self.operate("open")
-
+        self._client = node.create_client(GripperControl, service_name)
+        self._lock = threading.RLock()
+        self._pending = None
+        self._timer = None
     
+    def activate_tool(self) -> Future:
+        return self._send("close")
+
+    def deactivate_tool(self) -> Future:
+        return self._send("open")
+
+    def service_is_ready(self) -> bool:
+        return self._client.service_is_ready()
+
+    def _send(self, state: str) -> Future:
+        future = Future()
+
+        with self._lock:
+            if self._pending is not None:
+                future.set_result(failed("Another gripper command is pending"))
+                return future
+
+            if not self.service_is_ready():
+                future.set_result(failed("Gripper service is unavailable"))
+                return future
+
+            self._pending = future
+            self._timer = self.node.create_timer(self.timeout_sec, self._on_timeout)
+
+            request = GripperControl.Request(
+                gripper_state=state,
+                keep_compressor_running=self.keep_compressor_running
+            )
+            try:
+                self._client.call_async(request).add_done_callback(self._on_response)
+            except Exception as error:
+                self._finish(failed(f"Failed to send gripper command: {error}"))
+                
+        return future
+
+    def _on_response(self, service_future):
+        try:
+            response = service_future.result()
+        except Exception as error:
+            self._finish(failed(f"Failed to get gripper response: {error}"))
+            return
+
+        if response.success:
+            self._finish(OperationResult(success=True, message=response.message))
+        else:
+            self._finish(failed(f"Gripper command failed: {response.message}"))
+
+    def _on_timeout(self):
+        with self._lock:
+            if self._timer is not None:
+                self._timer.cancel()
+
+            if self._pending is not None and not self._pending.done():
+                self.node.get_logger().error("Gripper command timed out")
+                self._pending.set_result(OperationResult(
+                    success=False,
+                    message="No Gripper response received before timeout",
+                    error_code="TIMEOUT"
+                ))
+
+    def _finish(self, result: OperationResult):
+        with self._lock:
+            if self._timer is not None:
+                self.node.destroy_timer(self._timer)
+                self._timer = None
+
+            future = self._pending
+            self._pending = None
+
+            if future is not None and not future.done():
+                future.set_result(result)

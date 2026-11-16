@@ -6,14 +6,10 @@ from rclpy.executors import MultiThreadedExecutor
 from std_srvs.srv import Trigger
 
 from depalletizing_interfaces.models import OperationResult, RobotPose
+from depalletizing_interfaces.workflow import PickAndPlaceWorkflow
 from depalletizing_pick_place.pick_place import PickPlace
 from depalletizing_pick_place.robot_driver import DobotActionRobot
-
-class DummyGripper:
-    def activate_tool(self):
-        return OperationResult(success=True, message="Gripper activated")
-    def deactivate_tool(self):
-        return OperationResult(success=True, message="Gripper deactivated")
+from depalletizing_pick_place.gripper_client import GripperClient
 
 class DepalletizingMainNode(Node):
 
@@ -32,8 +28,11 @@ class DepalletizingMainNode(Node):
 
         # Initialize drivers
         self.robot = DobotActionRobot(self)
-        self.gripper = DummyGripper()
-        self.workflow = PickPlace(self.robot, self.gripper)
+        self.gripper = GripperClient(self)
+        self.pick_place = PickPlace(self.robot, self.gripper)
+        self.workflow = PickAndPlaceWorkflow(
+            self.pick_place.pick_object, self.pick_place.place_object,
+        )
 
         self._workflow_running = False
 
@@ -72,11 +71,16 @@ class DepalletizingMainNode(Node):
                 response.message = "Dobot Action Server is unavailable."
                 return response
 
+            if not self.gripper.service_is_ready():
+                response.success = False
+                response.message = "Gripper service is unavailable."
+                return response
+
             self._workflow_running = True
 
         try:
-            # Read pick and place positions from ROS 2 parameters.
 
+            # Read pick and place positions from ROS 2 parameters.
             pick_pose = RobotPose(
                 x=self.get_parameter('pick_x').value,
                 y=self.get_parameter('pick_y').value,
@@ -90,7 +94,9 @@ class DepalletizingMainNode(Node):
                 z=self.get_parameter('place_z').value,
                 r=self.get_parameter('place_r').value,
             )
-            workflow_future = self.workflow.run_full_workflow(
+
+            workflow_future = self.workflow.execute_pick_and_place(
+
                 pick_pose,
                 place_pose,
             )
