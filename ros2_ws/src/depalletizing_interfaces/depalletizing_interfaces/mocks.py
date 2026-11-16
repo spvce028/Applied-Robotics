@@ -11,9 +11,10 @@ class MockRobot:
         """Initialize robot state and movement history."""
         self.current_pose = None
         self.movement_history = []
+        self.motion_types = []
         self.should_fail = False
 
-    def move_to(self, pose: RobotPose) -> OperationResult:
+    def move_to(self, pose: RobotPose, motion_type: int = 1) -> OperationResult:
         """Simulate moving the robot to a target pose."""
         if self.should_fail:
             return OperationResult(
@@ -24,6 +25,7 @@ class MockRobot:
 
         self.current_pose = pose
         self.movement_history.append(pose)
+        self.motion_types.append(motion_type)
 
         return OperationResult(
             success=True,

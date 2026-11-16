@@ -4,7 +4,7 @@ from rclpy.task import Future
 
 from depalletizing_interfaces.mocks import MockGripper, MockRobot
 from depalletizing_interfaces.models import OperationResult, RobotPose
-from depalletizing_pick_place.pick_place import PickPlace
+from depalletizing_pick_place.pick_place import HELD_NOTE, MOVL, MOVJ, PickPlace
 
 
 APPROACH_OFFSET_Z = 50.0
@@ -41,7 +41,7 @@ class FailOnNthRobot(MockRobot):
         self.message = message
         self.call_count = 0
 
-    def move_to(self, pose: RobotPose) -> OperationResult:
+    def move_to(self, pose: RobotPose, motion_type: int = 1) -> OperationResult:
         self.call_count += 1
         if self.call_count == self.fail_on_call:
             return OperationResult(
@@ -49,7 +49,7 @@ class FailOnNthRobot(MockRobot):
                 message=self.message,
                 error_code=self.error_code,
             )
-        return super().move_to(pose)
+        return super().move_to(pose, motion_type)
 
 
 def test_pick_object_success_sequence():
@@ -351,10 +351,12 @@ class AsyncRobot:
 
     def __init__(self):
         self.calls = []
+        self.motion_types = []
         self.pending = None
 
-    def move_to(self, pose):
+    def move_to(self, pose, motion_type=1):
         self.calls.append(pose)
+        self.motion_types.append(motion_type)
         self.pending = Future()
         return self.pending
 
@@ -416,7 +418,7 @@ def test_step_exception_returns_workflow_error():
     robot = MockRobot()
     gripper = MockGripper()
 
-    def broken_move(pose):
+    def broken_move(pose, motion_type=1):
         raise RuntimeError("driver crashed")
 
     robot.move_to = broken_move
@@ -428,3 +430,129 @@ def test_step_exception_returns_workflow_error():
     assert result.error_code == "WORKFLOW_ERROR"
     assert "driver crashed" in result.message
     assert gripper.is_active is False
+
+
+def test_vertical_moves_use_linear_motion():
+    """Approach with MOVJ. Descend and lift with MOVL."""
+    robot = MockRobot()
+    gripper = MockGripper()
+    pick_place = PickPlace(robot, gripper)
+    pose = make_pose()
+
+    pick_result = pick_place.pick_object(pose).result()
+    assert pick_result.success is True
+    assert robot.motion_types == [MOVJ, MOVL, MOVL]
+    assert pick_place.holding_object is True
+
+    robot.motion_types.clear()
+    place_result = pick_place.place_object(pose).result()
+    assert place_result.success is True
+    assert robot.motion_types == [MOVJ, MOVL, MOVL]
+    assert pick_place.holding_object is False
+
+
+def test_cancel_between_steps_skips_the_descent():
+    """Do not start the next movement after cancellation."""
+    cancelled = False
+
+    def is_cancelled():
+        return cancelled
+
+    robot = AsyncRobot()
+    gripper = MockGripper()
+    pick_place = PickPlace(robot, gripper, is_cancelled=is_cancelled)
+    pose = make_pose()
+
+    workflow = pick_place.pick_object(pose)
+    assert robot.calls == [approach_of(pose)]
+    assert workflow.done() is False
+
+    cancelled = True
+    robot.pending.set_result(OperationResult(success=True))
+
+    result = workflow.result()
+    assert result.success is False
+    assert result.error_code == "CANCELLED"
+    assert robot.calls == [approach_of(pose)]
+    assert gripper.is_active is False
+    assert pick_place.holding_object is False
+    assert HELD_NOTE not in result.message
+
+
+def test_cancel_after_grasp_keeps_the_object_held():
+    """Leave the gripper closed when cancellation happens after grasping."""
+    cancelled = False
+
+    def is_cancelled():
+        return cancelled
+
+    robot = AsyncRobot()
+    gripper = AsyncGripper()
+    pick_place = PickPlace(robot, gripper, is_cancelled=is_cancelled)
+    pose = make_pose()
+    approach = approach_of(pose)
+
+    workflow = pick_place.pick_object(pose)
+    robot.pending.set_result(OperationResult(success=True))
+    robot.pending.set_result(OperationResult(success=True))
+    assert robot.calls == [approach, pose]
+
+    cancelled = True
+    gripper.pending.set_result(OperationResult(success=True, message="closed"))
+
+    result = workflow.result()
+    assert result.success is False
+    assert result.error_code == "CANCELLED"
+    assert HELD_NOTE in result.message
+    assert robot.calls == [approach, pose]
+    assert pick_place.holding_object is True
+
+
+def test_lift_failure_leaves_the_object_held():
+    """Do not open the gripper when the lift fails after a grasp."""
+    robot = FailOnNthRobot(fail_on_call=3)
+    gripper = MockGripper()
+    pick_place = PickPlace(robot, gripper)
+    pose = make_pose()
+
+    result = pick_place.pick_object(pose).result()
+
+    assert result.success is False
+    assert result.error_code == "MOVE_FAILED"
+    assert HELD_NOTE in result.message
+    assert gripper.is_active is True
+    assert pick_place.holding_object is True
+    assert robot.movement_history == [approach_of(pose), pose]
+
+
+def test_place_failure_before_release_keeps_the_object_held():
+    """Do not open the gripper when placement fails before release."""
+    robot = FailOnNthRobot(fail_on_call=1)
+    gripper = MockGripper()
+    gripper.activate_tool()
+    pick_place = PickPlace(robot, gripper)
+    pick_place.holding_object = True
+
+    result = pick_place.place_object(make_pose()).result()
+
+    assert result.success is False
+    assert result.error_code == "MOVE_FAILED"
+    assert HELD_NOTE in result.message
+    assert gripper.is_active is True
+    assert pick_place.holding_object is True
+
+
+def test_retreat_failure_after_release_is_not_holding():
+    """A failed retreat after release does not report a held object."""
+    robot = FailOnNthRobot(fail_on_call=3)
+    gripper = MockGripper()
+    gripper.activate_tool()
+    pick_place = PickPlace(robot, gripper)
+
+    result = pick_place.place_object(make_pose()).result()
+
+    assert result.success is False
+    assert result.error_code == "MOVE_FAILED"
+    assert HELD_NOTE not in result.message
+    assert gripper.is_active is False
+    assert pick_place.holding_object is False
