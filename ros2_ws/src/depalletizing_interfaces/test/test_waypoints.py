@@ -180,3 +180,20 @@ def test_empty_sequence_succeeds():
 
     assert result.success is True
     move_to.assert_not_called()
+
+
+def test_cancellation_before_first_waypoint():
+    """Do not start movement when cancellation already exists."""
+    poses = make_poses()
+    move_to = Mock()
+    executor = WaypointExecutor(
+        move_to,
+        is_cancelled=lambda: True,
+    )
+
+    sequence_future = executor.move_through_waypoints(poses)
+    result = sequence_future.result()
+
+    assert result.success is False
+    assert result.error_code == "CANCELLED"
+    move_to.assert_not_called()
