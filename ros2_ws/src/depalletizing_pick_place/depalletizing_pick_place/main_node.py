@@ -140,17 +140,25 @@ class DepalletizingMainNode(Node):
             ),
         )
 
+        self._cancel_requested = threading.Event()
+
         self.pick_place = PickPlace(
             self.robot,
             self.gripper,
             approach_height=self.get_parameter('approach_height').value,
+            is_cancelled=self._cancel_requested.is_set,
         )
 
         self.workflow = PickAndPlaceWorkflow(
-            self.pick_place.pick_object, self.pick_place.place_object,
+            self.pick_place.pick_object,
+            self.pick_place.place_object,
+            is_cancelled=self._cancel_requested.is_set,
         )
 
         self._workflow_running = False
+
+        # Block new starts while cancellation is handed to the robot driver.
+        self._cancel_dispatching = False
 
         self._homing_confirmed = False
 
@@ -169,6 +177,18 @@ class DepalletizingMainNode(Node):
             self.handle_confirm_homing,
         )
 
+        self.cancel_service = self.create_service(
+            Trigger,
+            '/cancel_depalletizing',
+            self.handle_cancel_service,
+        )
+
+        self.reset_fault_service = self.create_service(
+            Trigger,
+            '/reset_fault',
+            self.handle_reset_fault,
+        )
+
         self.get_logger().info(
             "Depalletizing node initialized in IDLE state. "
             "Call service '/start_depalletizing' to begin workflow."
@@ -177,7 +197,11 @@ class DepalletizingMainNode(Node):
     def handle_confirm_homing(self, request, response):
         """Record manual homing confirmation without moving the robot."""
         with self._workflow_lock:
-            if self._workflow_running or self.robot.is_busy:
+            if (
+                self._workflow_running
+                or self._cancel_dispatching
+                or self.robot.is_busy
+            ):
                 response.success = False
                 response.message = (
                     'Cannot confirm homing while an operation is active.'
@@ -198,39 +222,125 @@ class DepalletizingMainNode(Node):
         self.get_logger().info(response.message)
         return response
 
+    def handle_cancel_service(self, request, response):
+        """Request cancellation without waiting for movement completion."""
+        with self._workflow_lock:
+            if self._cancel_dispatching:
+                response.success = False
+                response.message = 'A cancellation request is being dispatched.'
+                return response
+
+            # Cancellation must also work when homing or reachability checks fail.
+            if not self._workflow_running and not self.robot.is_busy:
+                response.success = False
+                response.message = 'No active operation to cancel.'
+                return response
+
+            # Prevent subsequent pick/place steps, including after a gripper reply.
+            self._cancel_requested.set()
+            self._cancel_dispatching = True
+
+        try:
+            # Driver callbacks can finish the workflow and acquire our lock.
+            # Dispatch outside it; _cancel_dispatching blocks a new start meanwhile.
+            self.robot.cancel_current_goal()
+            response.success = True
+            response.message = (
+                'Cancellation requested. Robot standstill is not yet confirmed.'
+            )
+        except Exception as error:
+            # Keep the event set even if the driver cannot send the request.
+            response.success = False
+            response.message = f'Failed to request robot cancellation: {error}'
+            self.get_logger().error(response.message)
+        finally:
+            with self._workflow_lock:
+                self._cancel_dispatching = False
+
+        # Completion callbacks, not this acknowledgement, release the workflow.
+        return response
+
+    def handle_reset_fault(self, request, response):
+        """Reset an idle driver without overriding its movement lock."""
+        with self._workflow_lock:
+            # Recovery must not overlap a workflow, movement or cancel dispatch.
+            if (
+                self._workflow_running
+                or self._cancel_dispatching
+                or self.robot.is_busy
+            ):
+                response.success = False
+                response.message = (
+                    'Cannot reset fault while an operation may still be active.'
+                )
+                return response
+
+            if not self.robot.is_faulted:
+                response.success = True
+                response.message = 'Robot driver is not faulted. No reset needed.'
+                return response
+
+            # Recovery does not establish a valid reference position. Require
+            # fresh manual homing confirmation before any subsequent movement.
+            self._homing_confirmed = False
+            try:
+                # Never force-release an uncertain movement in a service reset.
+                reset = self.robot.reset_fault(force=False)
+            except Exception as error:
+                response.success = False
+                response.message = f'Failed to reset robot fault: {error}'
+                self.get_logger().error(response.message)
+                return response
+
+            response.success = bool(reset) and not self.robot.is_faulted
+            if response.success:
+                response.message = (
+                    'Robot driver fault reset. Verify the robot reference '
+                    'and confirm manual homing before starting again.'
+                )
+            else:
+                response.message = 'Robot driver fault reset was refused.'
+
+        # This service neither starts a workflow nor clears a pending cancel event.
+        return response
+
+    def _check_preconditions(self) -> str | None:
+        """Return a rejection reason or None; caller must hold the lock."""
+        if self._workflow_running or self._cancel_dispatching:
+            return 'An operation is already running.'
+
+        if not self._homing_confirmed:
+            return (
+                'Homing has not been confirmed. '
+                'Perform homing manually and confirm it before starting.'
+            )
+
+        if self.robot.is_faulted:
+            return 'Robot driver is faulted. Recovery is required.'
+
+        if self.robot.is_busy:
+            return 'Robot driver is busy.'
+
+        if not self.robot.server_is_ready():
+            return 'Dobot Action Server is unavailable.'
+
+        if not self.gripper.service_is_ready():
+            return 'Gripper service is unavailable.'
+
+        return None
+
     def handle_start_service(self, request, response):
         """Accept a workflow request without blocking for its completion."""
 
         with self._workflow_lock:
+            rejection_reason = self._check_preconditions()
 
-            if self._workflow_running:
+            if rejection_reason is not None:
                 response.success = False
-                response.message = "A depalletizing workflow is already running."
+                response.message = rejection_reason
                 return response
 
-            if not self._homing_confirmed:
-                response.success = False
-                response.message = (
-                    'Homing has not been confirmed. '
-                    'Perform homing manually and confirm it before starting.'
-                )
-                return response
-
-            if self.robot.is_faulted:
-                response.success = False
-                response.message = "Robot driver is faulted. Recovery is required."
-                return response
-
-            if not self.robot.server_is_ready():
-                response.success = False
-                response.message = "Dobot Action Server is unavailable."
-                return response
-
-            if not self.gripper.service_is_ready():
-                response.success = False
-                response.message = "Gripper service is unavailable."
-                return response
-
+            self._cancel_requested.clear()
             self._workflow_running = True
 
         try:

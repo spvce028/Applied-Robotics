@@ -1,7 +1,7 @@
 """Exercise the real ROS start service with mocked hardware."""
 
 import time
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -177,6 +177,34 @@ def test_start_service_runs_async_workflow(fail_pick):
 
         client = client_node.create_client(Trigger, '/start_depalletizing')
         assert client.wait_for_service(timeout_sec=5.0)
+
+        for state, expected_message in (
+            ('is_faulted', 'faulted'),
+            ('is_busy', 'busy'),
+        ):
+            setattr(node.robot, state, True)
+
+            rejected = client.call_async(Trigger.Request())
+            executor.spin_until_future_complete(rejected, timeout_sec=5.0)
+
+            assert rejected.done()
+            assert not rejected.result().success
+            assert expected_message in rejected.result().message
+            assert not node._workflow_running
+            assert node.robot.movements == []
+
+            setattr(node.robot, state, False)
+
+        with patch.object(node.robot, 'server_is_ready', return_value=False):
+            rejected = client.call_async(Trigger.Request())
+            executor.spin_until_future_complete(rejected, timeout_sec=5.0)
+
+            assert rejected.done()
+            assert not rejected.result().success
+            assert 'Action Server' in rejected.result().message
+            assert not node._workflow_running
+            assert node.robot.movements == []
+
         response = client.call_async(Trigger.Request())
         executor.spin_until_future_complete(response, timeout_sec=5.0)
         assert response.done()
@@ -356,4 +384,188 @@ def test_invalid_parameter_prevents_driver_creation(name, value):
             robot_class.assert_not_called()
             gripper_class.assert_not_called()
     finally:
+        rclpy.shutdown()
+
+
+@pytest.mark.parametrize('scenario', ['idle', 'moving', 'driver_error'])
+def test_cancel_service(scenario):
+    """Acknowledge cancellation before completion and stop subsequent steps."""
+    # Only the hardware is replaced; services, workflow and primitives are real.
+    robot = Mock()
+    robot.is_faulted = False
+    robot.is_busy = False
+    robot.server_is_ready.return_value = True
+    gripper = Mock()
+    gripper.service_is_ready.return_value = True
+
+    rclpy.init()
+    executor = SingleThreadedExecutor()
+    node = None
+    client_node = None
+    try:
+        movement = Future()
+        robot.move_to.return_value = movement
+        with patch(
+            'depalletizing_pick_place.main_node.DobotActionRobot',
+            return_value=robot,
+        ), patch(
+            'depalletizing_pick_place.main_node.GripperClient',
+            return_value=gripper,
+        ):
+            node = DepalletizingMainNode(
+                parameter_overrides=make_test_parameters(),
+            )
+
+        client_node = rclpy.create_node('p5_cancel_test_client')
+        executor.add_node(node)
+        executor.add_node(client_node)
+        client = client_node.create_client(Trigger, '/cancel_depalletizing')
+        assert client.wait_for_service(timeout_sec=5.0)
+
+        if scenario != 'idle':
+            confirmation = node.handle_confirm_homing(
+                Trigger.Request(), Trigger.Response(),
+            )
+            assert confirmation.success
+            started = node.handle_start_service(
+                Trigger.Request(), Trigger.Response(),
+            )
+            assert started.success
+            robot.move_to.assert_called_once()
+            robot.is_busy = True
+
+            # Cancellation must remain available even if prerequisites are lost.
+            node._homing_confirmed = False
+            robot.server_is_ready.return_value = False
+            gripper.service_is_ready.return_value = False
+
+        if scenario == 'driver_error':
+            robot.cancel_current_goal.side_effect = RuntimeError('connection lost')
+
+        reply = client.call_async(Trigger.Request())
+        executor.spin_until_future_complete(reply, timeout_sec=5.0)
+        assert reply.done()
+        assert not node._cancel_dispatching
+
+        if scenario == 'idle':
+            assert not reply.result().success
+            assert 'No active operation' in reply.result().message
+            robot.cancel_current_goal.assert_not_called()
+            robot.move_to.assert_not_called()
+            assert not node._cancel_requested.is_set()
+        else:
+            assert reply.result().success == (scenario == 'moving')
+            robot.cancel_current_goal.assert_called_once()
+            assert node._cancel_requested.is_set()
+
+            # A response is not a terminal movement result: keep the run occupied.
+            assert not movement.done()
+            assert node._workflow_running
+            assert node.workflow.status == 'picking'
+
+            # Even if the movement finishes successfully after the cancel request,
+            # the next descent/grasp/place must not start (also on dispatch error).
+            robot.is_busy = False
+            movement.set_result(OperationResult(True, 'Movement ended'))
+            deadline = time.monotonic() + 5.0
+            while node._workflow_running and time.monotonic() < deadline:
+                executor.spin_once(timeout_sec=0.01)
+            assert not node._workflow_running
+            assert node.workflow.status == 'cancelled'
+            robot.move_to.assert_called_once()
+
+        gripper.activate_tool.assert_not_called()
+        gripper.deactivate_tool.assert_not_called()
+    finally:
+        executor.shutdown()
+        if client_node is not None:
+            client_node.destroy_node()
+        if node is not None:
+            node.destroy_node()
+        rclpy.shutdown()
+
+
+@pytest.mark.parametrize(
+    'scenario',
+    ['reset', 'no_fault', 'workflow', 'busy', 'cancel', 'refused', 'error'],
+)
+def test_reset_fault_service(scenario):
+    """Reset only an idle driver and require homing confirmation afterward."""
+    robot = Mock()
+    robot.is_faulted = scenario != 'no_fault'
+    robot.is_busy = scenario == 'busy'
+    gripper = Mock()
+
+    def reset_driver(*, force):
+        assert force is False
+        if scenario == 'error':
+            raise RuntimeError('recovery unavailable')
+        if scenario == 'refused':
+            return False
+        robot.is_faulted = False
+        return True
+
+    robot.reset_fault.side_effect = reset_driver
+    rclpy.init()
+    executor = SingleThreadedExecutor()
+    node = None
+    client_node = None
+    try:
+        with patch(
+            'depalletizing_pick_place.main_node.DobotActionRobot',
+            return_value=robot,
+        ), patch(
+            'depalletizing_pick_place.main_node.GripperClient',
+            return_value=gripper,
+        ):
+            node = DepalletizingMainNode(
+                parameter_overrides=make_test_parameters(),
+            )
+
+        # Simulate a prior reference confirmation and an earlier cancel request.
+        node._homing_confirmed = True
+        node._cancel_requested.set()
+        node._workflow_running = scenario == 'workflow'
+        node._cancel_dispatching = scenario == 'cancel'
+        client_node = rclpy.create_node('p5_reset_test_client')
+        executor.add_node(node)
+        executor.add_node(client_node)
+        client = client_node.create_client(Trigger, '/reset_fault')
+        assert client.wait_for_service(timeout_sec=5.0)
+        reply = client.call_async(Trigger.Request())
+        executor.spin_until_future_complete(reply, timeout_sec=5.0)
+        assert reply.done()
+        assert reply.result().success == (scenario in ('reset', 'no_fault'))
+
+        if scenario in ('workflow', 'busy', 'cancel', 'no_fault'):
+            robot.reset_fault.assert_not_called()
+            assert node._homing_confirmed
+        else:
+            robot.reset_fault.assert_called_once_with(force=False)
+            assert not node._homing_confirmed
+
+        if scenario == 'reset':
+            assert not robot.is_faulted
+            # Reset alone must not enable a new workflow.
+            rejected = node.handle_start_service(
+                Trigger.Request(), Trigger.Response(),
+            )
+            assert not rejected.success
+            assert 'Homing' in rejected.message
+        elif scenario in ('refused', 'error'):
+            assert robot.is_faulted
+
+        assert node._workflow_running == (scenario == 'workflow')
+        assert node._cancel_dispatching == (scenario == 'cancel')
+        assert node._cancel_requested.is_set()
+        robot.move_to.assert_not_called()
+        robot.cancel_current_goal.assert_not_called()
+        gripper.activate_tool.assert_not_called()
+        gripper.deactivate_tool.assert_not_called()
+    finally:
+        executor.shutdown()
+        if client_node is not None:
+            client_node.destroy_node()
+        if node is not None:
+            node.destroy_node()
         rclpy.shutdown()
