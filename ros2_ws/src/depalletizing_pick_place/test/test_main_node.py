@@ -50,6 +50,7 @@ def test_start_service_runs_async_workflow(fail_pick):
     """Drive the service, P5 workflow and P4 primitives through real ROS."""
     class Robot:
         is_faulted = False
+        is_busy = False
 
         def __init__(
             self,
@@ -119,6 +120,61 @@ def test_start_service_runs_async_workflow(fail_pick):
         client_node = rclpy.create_node('p5_workflow_test_client')
         executor.add_node(node)
         executor.add_node(client_node)
+
+        assert not node._homing_confirmed
+        assert node.robot.movements == []
+
+        start_client = client_node.create_client(
+            Trigger,
+            '/start_depalletizing',
+        )
+        assert start_client.wait_for_service(timeout_sec=5.0)
+
+        rejected_start = start_client.call_async(Trigger.Request())
+        executor.spin_until_future_complete(
+            rejected_start,
+            timeout_sec=5.0,
+        )
+
+        assert rejected_start.done()
+        assert not rejected_start.result().success
+        assert 'Homing' in rejected_start.result().message
+        assert not node._workflow_running
+        assert node.robot.movements == []
+
+        homing_client = client_node.create_client(
+            Trigger,
+            '/confirm_homing',
+        )
+        assert homing_client.wait_for_service(timeout_sec=5.0)
+
+        for state in ('is_busy', 'is_faulted'):
+            setattr(node.robot, state, True)
+
+            rejected_confirmation = homing_client.call_async(Trigger.Request())
+            executor.spin_until_future_complete(
+                rejected_confirmation,
+                timeout_sec=5.0,
+            )
+
+            assert rejected_confirmation.done()
+            assert not rejected_confirmation.result().success
+            assert not node._homing_confirmed
+            assert node.robot.movements == []
+
+            setattr(node.robot, state, False)
+
+        confirmation = homing_client.call_async(Trigger.Request())
+        executor.spin_until_future_complete(
+            confirmation,
+            timeout_sec=5.0,
+        )
+
+        assert confirmation.done()
+        assert confirmation.result().success
+        assert node._homing_confirmed
+        assert node.robot.movements == []
+
         client = client_node.create_client(Trigger, '/start_depalletizing')
         assert client.wait_for_service(timeout_sec=5.0)
         response = client.call_async(Trigger.Request())
@@ -127,6 +183,20 @@ def test_start_service_runs_async_workflow(fail_pick):
         assert response.result().success
         assert node.workflow.status == 'picking'
         assert node._workflow_running
+
+        movements_before = list(node.robot.movements)
+
+        confirmation_while_running = homing_client.call_async(Trigger.Request())
+        executor.spin_until_future_complete(
+            confirmation_while_running,
+            timeout_sec=5.0,
+        )
+
+        assert confirmation_while_running.done()
+        assert not confirmation_while_running.result().success
+        assert node._homing_confirmed
+        assert node._workflow_running
+        assert node.robot.movements == movements_before
 
         duplicate = client.call_async(Trigger.Request())
         executor.spin_until_future_complete(duplicate, timeout_sec=5.0)
@@ -162,6 +232,7 @@ def test_start_service_runs_async_workflow(fail_pick):
 def test_start_refused_when_gripper_unavailable():
     class Robot: 
         is_faulted = False
+        is_busy = False
 
         def __init__(
             self,
@@ -201,6 +272,12 @@ def test_start_refused_when_gripper_unavailable():
             node = DepalletizingMainNode(
                 parameter_overrides=make_test_parameters(),
             )
+
+        confirmation = node.handle_confirm_homing(
+            Trigger.Request(),
+            Trigger.Response(),
+        )
+        assert confirmation.success
 
         response = node.handle_start_service(Trigger.Request(), Trigger.Response())
 

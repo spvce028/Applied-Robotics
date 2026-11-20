@@ -152,6 +152,7 @@ class DepalletizingMainNode(Node):
 
         self._workflow_running = False
 
+        self._homing_confirmed = False
 
         self._workflow_lock = threading.Lock()
 
@@ -162,10 +163,40 @@ class DepalletizingMainNode(Node):
             self.handle_start_service
         )
 
+        self.confirm_homing_service = self.create_service(
+            Trigger,
+            '/confirm_homing',
+            self.handle_confirm_homing,
+        )
+
         self.get_logger().info(
             "Depalletizing node initialized in IDLE state. "
             "Call service '/start_depalletizing' to begin workflow."
         )
+
+    def handle_confirm_homing(self, request, response):
+        """Record manual homing confirmation without moving the robot."""
+        with self._workflow_lock:
+            if self._workflow_running or self.robot.is_busy:
+                response.success = False
+                response.message = (
+                    'Cannot confirm homing while an operation is active.'
+                )
+                return response
+
+            if self.robot.is_faulted:
+                response.success = False
+                response.message = (
+                    'Cannot confirm homing while the robot driver is faulted.'
+                )
+                return response
+
+            self._homing_confirmed = True
+
+        response.success = True
+        response.message = 'Manual homing confirmed. No movement was commanded.'
+        self.get_logger().info(response.message)
+        return response
 
     def handle_start_service(self, request, response):
         """Accept a workflow request without blocking for its completion."""
@@ -175,6 +206,14 @@ class DepalletizingMainNode(Node):
             if self._workflow_running:
                 response.success = False
                 response.message = "A depalletizing workflow is already running."
+                return response
+
+            if not self._homing_confirmed:
+                response.success = False
+                response.message = (
+                    'Homing has not been confirmed. '
+                    'Perform homing manually and confirm it before starting.'
+                )
                 return response
 
             if self.robot.is_faulted:
