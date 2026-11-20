@@ -1,8 +1,10 @@
 import rclpy
 import threading
+import math
 
 from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
+from rclpy.exceptions import ParameterUninitializedException
 from std_srvs.srv import Trigger
 
 from depalletizing_interfaces.models import OperationResult, RobotPose
@@ -11,25 +13,139 @@ from depalletizing_pick_place.pick_place import PickPlace
 from depalletizing_pick_place.robot_driver import DobotActionRobot
 from depalletizing_pick_place.gripper_client import GripperClient
 
+
 class DepalletizingMainNode(Node):
 
-    def __init__(self):
-        super().__init__('depalletizing_main_node')
-        # Configurable pick and place positions
-        self.declare_parameter('pick_x', 200.0)
-        self.declare_parameter('pick_y', 0.0)
-        self.declare_parameter('pick_z', 50.0)
-        self.declare_parameter('pick_r', 0.0)
+    def __init__(self, *, parameter_overrides=None):
+        super().__init__(
+            'depalletizing_main_node',
+            parameter_overrides=parameter_overrides,
+        )
 
-        self.declare_parameter('place_x', 250.0)
-        self.declare_parameter('place_y', 100.0)
-        self.declare_parameter('place_z', 50.0)
-        self.declare_parameter('place_r', 0.0)
+        # Required pick and place positions, without default values
+        self.declare_parameter('pick_x', rclpy.Parameter.Type.DOUBLE)
+        self.declare_parameter('pick_y', rclpy.Parameter.Type.DOUBLE)
+        self.declare_parameter('pick_z', rclpy.Parameter.Type.DOUBLE)
+        self.declare_parameter('pick_r', rclpy.Parameter.Type.DOUBLE)
+
+        self.declare_parameter('place_x', rclpy.Parameter.Type.DOUBLE)
+        self.declare_parameter('place_y', rclpy.Parameter.Type.DOUBLE)
+        self.declare_parameter('place_z', rclpy.Parameter.Type.DOUBLE)
+        self.declare_parameter('place_r', rclpy.Parameter.Type.DOUBLE)
+
+        # Required motion parameters
+        self.declare_parameter('velocity_ratio', rclpy.Parameter.Type.DOUBLE)
+        self.declare_parameter('acceleration_ratio', rclpy.Parameter.Type.DOUBLE)
+        self.declare_parameter('movement_timeout', rclpy.Parameter.Type.DOUBLE)
+        self.declare_parameter('approach_height', rclpy.Parameter.Type.DOUBLE)
+
+        # Required gripper parameters
+        self.declare_parameter('gripper_service_name', rclpy.Parameter.Type.STRING)
+        self.declare_parameter('gripper_timeout', rclpy.Parameter.Type.DOUBLE)
+        self.declare_parameter('keep_compressor_running', rclpy.Parameter.Type.BOOL)
+
+        # Only Position Params
+        required_pose_parameters = (
+            'pick_x', 'pick_y', 'pick_z', 'pick_r',
+            'place_x', 'place_y', 'place_z', 'place_r',
+        )
+
+        # ALL Params
+        required_parameters = required_pose_parameters + (
+            'velocity_ratio',
+            'acceleration_ratio',
+            'movement_timeout',
+            'approach_height',
+            'gripper_service_name',
+            'gripper_timeout',
+            'keep_compressor_running',
+        )
+
+        # Checking if Params are missing
+        missing_parameters = []
+
+        # Loop checks all Params
+        for name in required_parameters:
+            try:
+                self.get_parameter(name)
+            except ParameterUninitializedException:
+                missing_parameters.append(name)
+
+        if missing_parameters:
+            message = (
+                'Missing required parameters: '
+                + ', '.join(missing_parameters)
+            )
+            self.get_logger().fatal(message)
+            raise RuntimeError(message)
+
+        # Checking if Params are invalid for Position Params
+        invalid_parameters = []
+
+        for name in required_pose_parameters:
+            value = self.get_parameter(name).value
+
+            if not math.isfinite(value):
+                invalid_parameters.append(name)
+
+        if invalid_parameters:
+            message = (
+                'Parameters must be finite numbers: '
+                + ', '.join(invalid_parameters)
+            )
+            self.get_logger().fatal(message)
+            raise RuntimeError(message)
+
+
+        parameter_errors = []
+
+        # Checking if Params are invalid for the other Params (if they are in scope, etc.)
+        for name in ('velocity_ratio', 'acceleration_ratio'):
+            value = self.get_parameter(name).value
+
+            if not math.isfinite(value) or not 0.0 < value <= 1.0:
+                parameter_errors.append(f'{name} must be within (0.0, 1.0]')
+
+        for name in ('movement_timeout', 'gripper_timeout', 'approach_height'):
+            value = self.get_parameter(name).value
+
+            if not math.isfinite(value) or value <= 0.0:
+                parameter_errors.append(f'{name} must be finite and greater than zero')
+
+        service_name = self.get_parameter('gripper_service_name').value
+
+        if not service_name.strip():
+            parameter_errors.append('gripper_service_name must not be empty')
+
+        if parameter_errors:
+            message = 'Invalid configuration: ' + '; '.join(parameter_errors)
+            self.get_logger().fatal(message)
+            raise RuntimeError(message)
+
 
         # Initialize drivers
-        self.robot = DobotActionRobot(self)
-        self.gripper = GripperClient(self)
-        self.pick_place = PickPlace(self.robot, self.gripper)
+        self.robot = DobotActionRobot(
+            self,
+            velocity_ratio=self.get_parameter('velocity_ratio').value,
+            acceleration_ratio=self.get_parameter('acceleration_ratio').value,
+            movement_timeout=self.get_parameter('movement_timeout').value,
+        )
+
+        self.gripper = GripperClient(
+            self,
+            service_name=self.get_parameter('gripper_service_name').value,
+            timeout_sec=self.get_parameter('gripper_timeout').value,
+            keep_compressor_running=(
+                self.get_parameter('keep_compressor_running').value
+            ),
+        )
+
+        self.pick_place = PickPlace(
+            self.robot,
+            self.gripper,
+            approach_height=self.get_parameter('approach_height').value,
+        )
+
         self.workflow = PickAndPlaceWorkflow(
             self.pick_place.pick_object, self.pick_place.place_object,
         )

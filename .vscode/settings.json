@@ -1,0 +1,6 @@
+{
+    "python.analysis.extraPaths": [
+        "./ros2_ws/src/depalletizing_interfaces",
+        "./ros2_ws/src/depalletizing_pick_place"
+    ]
+}

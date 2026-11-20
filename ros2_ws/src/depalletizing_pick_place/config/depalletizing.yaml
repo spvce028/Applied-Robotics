@@ -10,3 +10,12 @@ depalletizing_main_node:
     place_y: 100.0
     place_z: 50.0
     place_r: 0.0
+
+    velocity_ratio: 0.4
+    acceleration_ratio: 0.4
+    movement_timeout: 30.0
+    approach_height: 50.0
+
+    gripper_service_name: "/dobot_gripper_service"
+    gripper_timeout: 5.0
+    keep_compressor_running: false
