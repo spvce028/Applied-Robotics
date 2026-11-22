@@ -5,6 +5,7 @@ from threading import Lock
 
 from rclpy.task import Future
 
+from .errors import ERROR_CANCELLED, ERROR_WORKFLOW_BUSY, ERROR_WORKFLOW_ERROR
 from .models import OperationResult, RobotPose
 
 
@@ -49,7 +50,7 @@ class PickAndPlaceWorkflow:
                 workflow_future.set_result(OperationResult(
                     False,
                     'A workflow is already running',
-                    'WORKFLOW_BUSY',
+                    ERROR_WORKFLOW_BUSY,
                 ))
                 return workflow_future
 
@@ -67,7 +68,7 @@ class PickAndPlaceWorkflow:
             finish(OperationResult(
                 False,
                 f'Workflow error: {error}',
-                'WORKFLOW_ERROR',
+                ERROR_WORKFLOW_ERROR,
             ), 'failed')
 
         def start(operation, argument, phase):
@@ -92,7 +93,7 @@ class PickAndPlaceWorkflow:
             finish(OperationResult(
                 False,
                 message,
-                'CANCELLED',
+                ERROR_CANCELLED,
             ), 'cancelled')
 
         def start_place():
@@ -150,7 +151,7 @@ class PickAndPlaceWorkflow:
                         result.error_code,
                     ), (
                         'cancelled'
-                        if result.error_code == 'CANCELLED'
+                        if result.error_code == ERROR_CANCELLED
                         else 'failed'
                     ))
 
@@ -176,7 +177,7 @@ class PickAndPlaceWorkflow:
                 finish(OperationResult(
                     False,
                     'Workflow cancelled before picking',
-                    'CANCELLED',
+                    ERROR_CANCELLED,
                 ), 'cancelled')
             else:
                 start(self._pick_object, source, 'picking')

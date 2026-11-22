@@ -21,6 +21,7 @@ against timeouts, cancellation, and uncertain robot states.
 | Timeout | Reports `TIMEOUT`, cancels the goal, stays locked until a terminal result |
 | Cancellation | `cancel_current_goal()` requests cancellation of the active goal |
 | Faults | Uncertain states fault the driver; recover with `reset_fault()` or restart |
+| Workspace | Poses outside configured limits are rejected before a goal is sent |
 | Feedback | Latest `current_pose` is stored in `last_feedback` and logged |
 
 ## 2. Requirements
@@ -40,16 +41,26 @@ hardcoded values.
 | `velocity_ratio` | float | `0.4` | Motion velocity ratio, `(0.0, 1.0]` |
 | `acceleration_ratio` | float | `0.4` | Motion acceleration ratio, `(0.0, 1.0]` |
 | `movement_timeout` | float | `30.0` | Seconds before a goal times out |
+| `workspace_limits` | `WorkspaceLimits` | conservative Dobot envelope | Cartesian bounds checked before each goal |
 
 ```python
-from depalletizing_pick_place.robot_driver import DobotActionRobot
+from depalletizing_pick_place.robot_driver import (
+    DobotActionRobot,
+    WorkspaceLimits,
+)
 
+# Measure the real cell before a hardware run and adjust these bounds.
+limits = WorkspaceLimits(
+    x=(-320.0, 320.0), y=(-320.0, 320.0),
+    z=(-100.0, 300.0), r=(-360.0, 360.0),
+)
 robot = DobotActionRobot(
     node,
     action_server_name="/PTP_action",
     velocity_ratio=0.5,
     acceleration_ratio=0.3,
     movement_timeout=15.0,
+    workspace_limits=limits,
 )
 
 if not robot.wait_for_server(timeout_sec=5.0):
@@ -98,6 +109,7 @@ Every code path resolves the future with an `OperationResult`:
 | `CANCELLED` | False | Motion was canceled |
 | `TIMEOUT` | False | Motion exceeded `movement_timeout` |
 | `FAULTED` | False | Driver is faulted; recovery required |
+| `OUT_OF_WORKSPACE` | False | Target pose is outside configured workspace limits |
 
 ## 6. Timeout and Cancellation
 
@@ -183,7 +195,41 @@ finally:
     rclpy.shutdown()
 ```
 
-## 10. Integration
+## 10. Workspace Limits
+
+`WorkspaceLimits` checks x, y, z and r against axis-aligned bounds before a
+goal is sent. Non-finite pose values are rejected as well. A rejected pose
+resolves immediately with `OUT_OF_WORKSPACE`; the driver is not locked and the
+action server is not contacted.
+
+The defaults are conservative and are a software guard only. Measure the real
+cell before a hardware run. The main node reads `workspace_x_min/max`,
+`workspace_y_min/max`, `workspace_z_min/max` and `workspace_r_min/max` from
+`config/depalletizing.yaml`; library users can pass a `WorkspaceLimits` object
+directly to `DobotActionRobot`. `is_pose_within_workspace(pose)` can be used
+for a pre-check. Malformed bounds (non-finite values, reversed or missing
+limits) are rejected.
+
+## 11. Simulation Without Hardware
+
+`fake_ptp_action_server.py` provides a ROS action server with the same
+`PointToPoint` interface as the real driver. It publishes interpolated
+feedback, honours cancellation, and returns `achieved_pose`.
+
+```bash
+ros2 run depalletizing_pick_place fake_ptp_action_server
+```
+
+Run it with a `MultiThreadedExecutor` (as `main()` does) so cancel requests
+can be processed while a movement is simulated. The server name, feedback
+interval and movement duration can be overridden with the `action_name`,
+`feedback_interval` and `movement_duration` node parameters.
+
+The fake server replaces the PTP action server only. A gripper service is
+still required by the main node; either run the real gripper node or provide a
+matching `dobot_msgs/srv/GripperControl` service.
+
+## 12. Integration
 
 - `PickPlace` (`pick_place.py`) chains `move_to()` and gripper calls and stops
   on the first failure, cancellation, or timeout.
@@ -191,7 +237,7 @@ finally:
   the workflow, and refuses to start while `is_faulted` is `True` or the
   server/gripper is unavailable.
 
-## 11. Build and Test
+## 13. Build and Test
 
 Run from the repository root:
 
@@ -210,5 +256,12 @@ colcon test-result --verbose
 The driver tests (`test/test_robot_driver.py`) drive the real driver through a
 fake action client and cover success, rejection, failure, cancellation,
 timeout with cancellation, late goal acceptance, unavailable server,
-overlapping commands, and fault locking/recovery. They run without a physical
-robot; the full-ROS tests require the ROS 2 environment.
+overlapping commands, workspace limits, shared error codes, and fault
+locking/recovery. `test/test_fake_ptp_action_server.py` exercises the simulated
+action server's feedback, cancellation and overlap handling. These tests run
+without a physical robot; the full-ROS tests require the ROS 2 environment.
+
+Error codes are defined once in
+`depalletizing_interfaces/depalletizing_interfaces/errors.py`. Import the
+`ERROR_*` constants instead of writing string literals so producers and
+consumers stay in sync.

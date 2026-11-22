@@ -1,6 +1,7 @@
 
 """Mock robot and gripper implementations for hardware-free testing."""
 
+from .errors import ERROR_GRIPPER_FAILED, ERROR_MOVE_FAILED
 from .models import RobotPose, OperationResult
 
 
@@ -20,7 +21,7 @@ class MockRobot:
             return OperationResult(
                 success=False,
                 message="Simulated robot movement failure",
-                error_code="MOVE_FAILED"
+                error_code=ERROR_MOVE_FAILED
             )
 
         self.current_pose = pose
@@ -47,7 +48,7 @@ class MockGripper:
             return OperationResult(
                 success=False,
                 message="Simulated gripper activation failure",
-                error_code="GRIPPER_FAILED"
+                error_code=ERROR_GRIPPER_FAILED
             )
 
         self.is_active = True
@@ -63,7 +64,7 @@ class MockGripper:
             return OperationResult(
                 success=False,
                 message="Simulated gripper deactivation failure",
-                error_code="GRIPPER_FAILED"
+                error_code=ERROR_GRIPPER_FAILED
             )
 
         self.is_active = False

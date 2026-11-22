@@ -10,7 +10,7 @@ from std_srvs.srv import Trigger
 from depalletizing_interfaces.models import OperationResult, RobotPose
 from depalletizing_interfaces.workflow import PickAndPlaceWorkflow
 from depalletizing_pick_place.pick_place import PickPlace
-from depalletizing_pick_place.robot_driver import DobotActionRobot
+from depalletizing_pick_place.robot_driver import DobotActionRobot, WorkspaceLimits
 from depalletizing_pick_place.gripper_client import GripperClient
 
 
@@ -43,6 +43,16 @@ class DepalletizingMainNode(Node):
         self.declare_parameter('gripper_service_name', rclpy.Parameter.Type.STRING)
         self.declare_parameter('gripper_timeout', rclpy.Parameter.Type.DOUBLE)
         self.declare_parameter('keep_compressor_running', rclpy.Parameter.Type.BOOL)
+
+        # Optional workspace limits (conservative defaults)
+        self.declare_parameter('workspace_x_min', -320.0)
+        self.declare_parameter('workspace_x_max', 320.0)
+        self.declare_parameter('workspace_y_min', -320.0)
+        self.declare_parameter('workspace_y_max', 320.0)
+        self.declare_parameter('workspace_z_min', -100.0)
+        self.declare_parameter('workspace_z_max', 300.0)
+        self.declare_parameter('workspace_r_min', -360.0)
+        self.declare_parameter('workspace_r_max', 360.0)
 
         # Only Position Params
         required_pose_parameters = (
@@ -123,12 +133,37 @@ class DepalletizingMainNode(Node):
             raise RuntimeError(message)
 
 
+        try:
+            workspace_limits = WorkspaceLimits(
+                x=(
+                    self.get_parameter('workspace_x_min').value,
+                    self.get_parameter('workspace_x_max').value,
+                ),
+                y=(
+                    self.get_parameter('workspace_y_min').value,
+                    self.get_parameter('workspace_y_max').value,
+                ),
+                z=(
+                    self.get_parameter('workspace_z_min').value,
+                    self.get_parameter('workspace_z_max').value,
+                ),
+                r=(
+                    self.get_parameter('workspace_r_min').value,
+                    self.get_parameter('workspace_r_max').value,
+                ),
+            )
+        except ValueError as exc:
+            message = f'Invalid workspace limits: {exc}'
+            self.get_logger().fatal(message)
+            raise RuntimeError(message) from exc
+
         # Initialize drivers
         self.robot = DobotActionRobot(
             self,
             velocity_ratio=self.get_parameter('velocity_ratio').value,
             acceleration_ratio=self.get_parameter('acceleration_ratio').value,
             movement_timeout=self.get_parameter('movement_timeout').value,
+            workspace_limits=workspace_limits,
         )
 
         self.gripper = GripperClient(

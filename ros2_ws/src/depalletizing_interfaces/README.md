@@ -47,6 +47,20 @@ result = OperationResult(
 )
 ```
 
+### Shared Error Codes
+
+Producers should import constants from `depalletizing_interfaces.errors`
+instead of writing string literals:
+
+```python
+from depalletizing_interfaces.errors import ERROR_MOVE_FAILED
+```
+
+Available codes: `BUSY`, `FAULTED`, `SERVER_UNAVAILABLE`, `GOAL_REJECTED`,
+`TIMEOUT`, `CANCELLED`, `MOVE_FAILED`, `OUT_OF_WORKSPACE`, `GRIPPER_FAILED`,
+`WORKFLOW_BUSY`, `WORKFLOW_ERROR`. They are also re-exported from
+`depalletizing_interfaces`.
+
 ## 2. Mock Components
 
 The package provides simulated robot and gripper implementations for testing without physical hardware.

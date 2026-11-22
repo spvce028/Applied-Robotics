@@ -131,9 +131,12 @@ def _install_ros_stubs():
 _install_ros_stubs()
 
 from action_msgs.msg import GoalStatus  # noqa: E402
+from depalletizing_interfaces import errors as shared_errors  # noqa: E402
 from depalletizing_interfaces.models import RobotPose  # noqa: E402
+from depalletizing_pick_place import robot_driver  # noqa: E402
 from depalletizing_pick_place.robot_driver import (  # noqa: E402
     DobotActionRobot,
+    WorkspaceLimits,
 )
 
 # The driver keeps direct references to the imported classes, so the stub
@@ -510,3 +513,83 @@ def test_reset_without_fault_is_a_noop():
     driver, _, _ = make_driver()
     assert driver.reset_fault() is True
     assert driver.is_faulted is False
+
+
+def test_workspace_limits_detect_out_of_range_axes():
+    """Report every pose axis that falls outside the configured bounds."""
+    limits = WorkspaceLimits(
+        x=(0.0, 100.0), y=(-10.0, 10.0), z=(0.0, 50.0), r=(0.0, 90.0),
+    )
+
+    assert limits.violations(RobotPose(50.0, 0.0, 25.0, 45.0)) == []
+
+    problems = limits.violations(RobotPose(101.0, -11.0, -1.0, 91.0))
+    assert len(problems) == 4
+    assert all("outside" in problem for problem in problems)
+
+
+def test_non_finite_pose_is_rejected():
+    """Reject NaN or infinite pose values as workspace violations."""
+    limits = WorkspaceLimits()
+    problems = limits.violations(
+        RobotPose(float("nan"), 0.0, 0.0, 0.0)
+    )
+    assert problems == ["x is not a finite number"]
+
+
+def test_invalid_workspace_limits_are_rejected():
+    """Reject malformed bounds when limits are constructed."""
+    for kwargs in (
+        {"x": (10.0, 0.0)},
+        {"y": (float("nan"), 1.0)},
+        {"z": (1.0,)},
+    ):
+        try:
+            WorkspaceLimits(**kwargs)
+        except ValueError:
+            continue
+        raise AssertionError(f"Expected ValueError for {kwargs}")
+
+
+def test_out_of_workspace_pose_is_rejected_without_sending_a_goal():
+    """Reject an unsafe pose before touching the action server."""
+    driver, node, client = make_driver(
+        workspace_limits=WorkspaceLimits(x=(0.0, 100.0))
+    )
+
+    result = driver.move_to(RobotPose(200.0, 0.0, 40.0, 0.0)).result()
+
+    assert result.success is False
+    assert result.error_code == "OUT_OF_WORKSPACE"
+    assert "outside workspace limits" in result.message
+    assert client.goals == []
+    assert driver.is_busy is False
+    assert node.timers == []
+
+
+def test_custom_workspace_limits_are_used():
+    """Allow a pose when custom limits permit it."""
+    driver, _, client = make_driver(
+        workspace_limits=WorkspaceLimits(x=(0.0, 500.0))
+    )
+
+    assert driver.is_pose_within_workspace(pose()) is True
+
+    future = driver.move_to(pose())
+    assert len(client.goals) == 1
+    client.accept().succeed()
+    assert future.result().success is True
+
+
+def test_driver_uses_shared_error_codes():
+    """The driver's error codes are aliases of the shared definitions."""
+    assert robot_driver.ERROR_BUSY == shared_errors.ERROR_BUSY
+    assert robot_driver.ERROR_FAULTED == shared_errors.ERROR_FAULTED
+    assert robot_driver.ERROR_SERVER_UNAVAILABLE == \
+        shared_errors.ERROR_SERVER_UNAVAILABLE
+    assert robot_driver.ERROR_GOAL_REJECTED == shared_errors.ERROR_GOAL_REJECTED
+    assert robot_driver.ERROR_TIMEOUT == shared_errors.ERROR_TIMEOUT
+    assert robot_driver.ERROR_CANCELLED == shared_errors.ERROR_CANCELLED
+    assert robot_driver.ERROR_MOVE_FAILED == shared_errors.ERROR_MOVE_FAILED
+    assert robot_driver.ERROR_OUT_OF_WORKSPACE == \
+        shared_errors.ERROR_OUT_OF_WORKSPACE

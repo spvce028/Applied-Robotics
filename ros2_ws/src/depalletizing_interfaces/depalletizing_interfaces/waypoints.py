@@ -4,6 +4,7 @@ from collections.abc import Callable, Iterable
 
 from rclpy.task import Future
 
+from .errors import ERROR_CANCELLED, ERROR_MOVE_FAILED, ERROR_WORKFLOW_ERROR
 from .models import OperationResult, RobotPose
 
 
@@ -76,7 +77,7 @@ class WaypointExecutor:
                             "Waypoint movement failed: "
                             f"{exc}"
                         ),
-                        error_code="MOVE_FAILED",
+                        error_code=ERROR_MOVE_FAILED,
                     )
                 )
 
@@ -90,7 +91,7 @@ class WaypointExecutor:
                         OperationResult(
                             success=False,
                             message="Waypoint sequence cancelled",
-                            error_code="CANCELLED",
+                            error_code=ERROR_CANCELLED,
                         )
                     )
                     return
@@ -100,7 +101,7 @@ class WaypointExecutor:
                     OperationResult(
                         success=False,
                         message=f"Cancellation check failed: {exc}",
-                        error_code="WORKFLOW_ERROR",
+                        error_code=ERROR_WORKFLOW_ERROR,
                     )
                 )
                 return
@@ -122,7 +123,7 @@ class WaypointExecutor:
                     OperationResult(
                         success=False,
                         message=f"Could not read next waypoint: {exc}",
-                        error_code="WORKFLOW_ERROR",
+                        error_code=ERROR_WORKFLOW_ERROR,
                     )
                 )
                 return
@@ -142,7 +143,7 @@ class WaypointExecutor:
                             "Could not start waypoint movement: "
                             f"{exc}"
                         ),
-                        error_code="MOVE_FAILED",
+                        error_code=ERROR_MOVE_FAILED,
                     )
                 )
 

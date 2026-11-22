@@ -5,6 +5,7 @@ from collections.abc import Callable
 
 from rclpy.task import Future
 
+from depalletizing_interfaces.errors import ERROR_CANCELLED, ERROR_WORKFLOW_ERROR
 from depalletizing_interfaces.models import RobotPose, OperationResult
 
 
@@ -69,7 +70,7 @@ class PickPlace:
             return self._completed_future(
                 self._failed_result(
                     f"Operation error: {exc}",
-                    "WORKFLOW_ERROR",
+                    ERROR_WORKFLOW_ERROR,
                 )
             )
 
@@ -105,13 +106,13 @@ class PickPlace:
                 if self._is_cancelled():
                     finish(self._failed_result(
                         "Cancelled before the next step",
-                        "CANCELLED",
+                        ERROR_CANCELLED,
                     ))
                     return
             except Exception as exc:
                 finish(self._failed_result(
                     f"Cancellation check failed: {exc}",
-                    "WORKFLOW_ERROR",
+                    ERROR_WORKFLOW_ERROR,
                 ))
                 return
 
@@ -126,7 +127,7 @@ class PickPlace:
             except Exception as exc:
                 finish(self._failed_result(
                     f"Workflow execution error: {exc}",
-                    "WORKFLOW_ERROR",
+                    ERROR_WORKFLOW_ERROR,
                 ))
 
         def handle_step_result(future, index):
@@ -156,7 +157,7 @@ class PickPlace:
             except Exception as exc:
                 finish(self._failed_result(
                     f"Operation failed: {exc}",
-                    "WORKFLOW_ERROR",
+                    ERROR_WORKFLOW_ERROR,
                 ))
 
         execute_step(0)
@@ -198,7 +199,7 @@ class PickPlace:
         if self.holding_object:
             return self._completed_future(self._failed_result(
                 "Cannot pick while an object is still held",
-                "WORKFLOW_ERROR",
+                ERROR_WORKFLOW_ERROR,
             ))
 
         approach_pose = self._approach_pose(pose)

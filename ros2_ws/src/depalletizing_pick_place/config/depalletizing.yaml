@@ -19,3 +19,13 @@ depalletizing_main_node:
     gripper_service_name: "/dobot_gripper_service"
     gripper_timeout: 5.0
     keep_compressor_running: false
+
+    # Conservative defaults - measure the real cell before hardware use
+    workspace_x_min: -320.0
+    workspace_x_max: 320.0
+    workspace_y_min: -320.0
+    workspace_y_max: 320.0
+    workspace_z_min: -100.0
+    workspace_z_max: 300.0
+    workspace_r_min: -360.0
+    workspace_r_max: 360.0

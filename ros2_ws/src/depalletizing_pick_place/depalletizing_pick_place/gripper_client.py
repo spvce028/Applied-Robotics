@@ -5,12 +5,15 @@ import threading
 from rclpy.node import Node
 from rclpy.task import Future
 
+from depalletizing_interfaces.errors import ERROR_GRIPPER_FAILED, ERROR_TIMEOUT
 from depalletizing_interfaces.models import OperationResult
 
 from dobot_msgs.srv import GripperControl
 
 def failed(message: str) -> OperationResult:
-    return OperationResult(success=False, message=message, error_code="GRIPPER_FAILED")
+    return OperationResult(
+        success=False, message=message, error_code=ERROR_GRIPPER_FAILED
+    )
 
 # Sends open and close commands to the gripper
 class GripperClient:
@@ -87,7 +90,7 @@ class GripperClient:
                 self._pending.set_result(OperationResult(
                     success=False,
                     message="No Gripper response received before timeout",
-                    error_code="TIMEOUT"
+                    error_code=ERROR_TIMEOUT
                 ))
 
     def _finish(self, result: OperationResult):

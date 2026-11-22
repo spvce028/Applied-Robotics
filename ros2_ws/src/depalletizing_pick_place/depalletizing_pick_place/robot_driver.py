@@ -1,23 +1,25 @@
 """Asynchronous Dobot Magician ROS 2 action client.
 
-The driver wraps the PointToPoint action server (``/PTP_action`` by default)
-and exposes a single fully asynchronous entry point,
-:meth:`DobotActionRobot.move_to`.  Every code path resolves the returned
-future with an :class:`~depalletizing_interfaces.models.OperationResult` and
-no call blocks the ROS executor.
+Driver wraps PointToPoint action server (``/PTP_action`` by default)
+and exposes single fully asynchronous entry point,
+:meth:`DobotActionRobot.move_to`.  Every code path resolves returned
+future with :class:`~depalletizing_interfaces.models.OperationResult` and
+no call blocks ROS executor.
 
 Safety model
 ------------
-A movement locks the driver.  The lock is only released once the action
-reaches a *terminal* state (succeeded, aborted, cancelled, or rejected).  On
-timeout the driver reports ``TIMEOUT`` immediately, requests cancellation of
-the active goal, but stays locked so that no second movement can be issued
-while the first goal may still be moving.  If the robot state becomes
-uncertain the driver enters a fault; use :meth:`reset_fault` (after verifying
-the robot is safe) or restart the node to recover.
+Movement locks driver. Lock is only released once action
+reaches *terminal* state (succeeded, aborted, cancelled, or rejected).  
+On timeout driver reports ``TIMEOUT`` immediately, requests cancellation of
+active goal, but stays locked so that no second movement can be issued
+while first goal may still be moving.  If robot state becomes uncertain
+driver enters fault; use :meth:`reset_fault` (after verifying robot is safe) 
+or restart node to recover.
 """
 
+import math
 import threading
+from dataclasses import dataclass
 
 from action_msgs.msg import GoalStatus
 from dobot_msgs.action import PointToPoint
@@ -26,17 +28,59 @@ from rclpy.clock import Clock, ClockType
 from rclpy.node import Node
 from rclpy.task import Future
 
+from depalletizing_interfaces.errors import (
+    ERROR_BUSY,
+    ERROR_CANCELLED,
+    ERROR_FAULTED,
+    ERROR_GOAL_REJECTED,
+    ERROR_MOVE_FAILED,
+    ERROR_OUT_OF_WORKSPACE,
+    ERROR_SERVER_UNAVAILABLE,
+    ERROR_TIMEOUT,
+)
 from depalletizing_interfaces.models import OperationResult, RobotPose
 
 
-# Shared error codes used across the project.
-ERROR_BUSY = "BUSY"
-ERROR_FAULTED = "FAULTED"
-ERROR_SERVER_UNAVAILABLE = "SERVER_UNAVAILABLE"
-ERROR_GOAL_REJECTED = "GOAL_REJECTED"
-ERROR_TIMEOUT = "TIMEOUT"
-ERROR_CANCELLED = "CANCELLED"
-ERROR_MOVE_FAILED = "MOVE_FAILED"
+@dataclass(frozen=True)
+class WorkspaceLimits:
+    """Axis-aligned Cartesian limits in millimetres and degrees.
+
+    Defaults describe a conservative Dobot Magician envelope. They are a
+    software guard only: verify them against the real cell before hardware
+    testing and pass measured values through ``workspace_limits``.
+    """
+
+    x: tuple[float, float] = (-320.0, 320.0)
+    y: tuple[float, float] = (-320.0, 320.0)
+    z: tuple[float, float] = (-100.0, 300.0)
+    r: tuple[float, float] = (-360.0, 360.0)
+
+    def as_dict(self) -> dict[str, tuple[float, float]]:
+        """Return the limits keyed by pose axis."""
+        return {"x": self.x, "y": self.y, "z": self.z, "r": self.r}
+
+    def __post_init__(self):
+        """Reject malformed bounds at construction time."""
+        for axis, bounds in self.as_dict().items():
+            if len(bounds) != 2 or not all(math.isfinite(v) for v in bounds):
+                raise ValueError(f"{axis} limits must be two finite numbers")
+            if bounds[0] > bounds[1]:
+                raise ValueError(f"{axis} lower limit exceeds upper limit")
+
+    def violations(self, pose: RobotPose) -> list[str]:
+        """Return a description of every axis outside the limits."""
+        values = {"x": pose.x, "y": pose.y, "z": pose.z, "r": pose.r}
+        problems = []
+        for axis, (lower, upper) in self.as_dict().items():
+            value = values[axis]
+            if not math.isfinite(value):
+                problems.append(f"{axis} is not a finite number")
+            elif value < lower or value > upper:
+                problems.append(f"{axis}={value} outside [{lower}, {upper}]")
+        return problems
+
+
+DEFAULT_WORKSPACE_LIMITS = WorkspaceLimits()
 
 
 class DobotActionRobot:
@@ -54,6 +98,7 @@ class DobotActionRobot:
         velocity_ratio: float = DEFAULT_VELOCITY_RATIO,
         acceleration_ratio: float = DEFAULT_ACCELERATION_RATIO,
         movement_timeout: float = DEFAULT_MOVEMENT_TIMEOUT,
+        workspace_limits: WorkspaceLimits | None = DEFAULT_WORKSPACE_LIMITS,
     ):
         """Create the action client.
 
@@ -64,6 +109,8 @@ class DobotActionRobot:
             acceleration_ratio: Motion acceleration ratio passed to the server.
             movement_timeout: Seconds before an active goal is considered
                 timed out and cancellation is requested.
+            workspace_limits: Cartesian bounds checked before every goal.
+                Pass ``None`` to use the conservative defaults.
         """
         if not 0.0 < velocity_ratio <= 1.0:
             raise ValueError("velocity_ratio must be within (0.0, 1.0]")
@@ -71,12 +118,17 @@ class DobotActionRobot:
             raise ValueError("acceleration_ratio must be within (0.0, 1.0]")
         if movement_timeout <= 0.0:
             raise ValueError("movement_timeout must be positive")
+        if workspace_limits is None:
+            workspace_limits = DEFAULT_WORKSPACE_LIMITS
+        if not callable(getattr(workspace_limits, "violations", None)):
+            raise ValueError("workspace_limits must provide violations(pose)")
 
         self.node = node
         self.action_server_name = action_server_name
         self.velocity_ratio = velocity_ratio
         self.acceleration_ratio = acceleration_ratio
         self.movement_timeout = movement_timeout
+        self.workspace_limits = workspace_limits
 
         self._action_client = ActionClient(
             self.node, PointToPoint, action_server_name
@@ -136,6 +188,10 @@ class DobotActionRobot:
         """Check whether the action server is available."""
         return self._action_client.server_is_ready()
 
+    def is_pose_within_workspace(self, pose: RobotPose) -> bool:
+        """Return True when every pose axis is inside the configured limits."""
+        return not self.workspace_limits.violations(pose)
+
     # -------------------------------------------------------------- movement
     def move_to(self, pose: RobotPose, motion_type: int = 1) -> Future:
         """Send a movement goal asynchronously.
@@ -145,13 +201,32 @@ class DobotActionRobot:
         state (or is rejected/timed out).
 
         Args:
-            pose: Target pose for the robot.
-            motion_type: PointToPoint motion type (1 = MOVJ in Cartesian space).
+            pose: Target pose for the robot, validated against workspace limits.
+            motion_type: PointToPoint motion type (1 = MOVJ in Cartesian space,
+                2 = MOVL linear Cartesian).
 
         Returns:
-            Future resolved with an OperationResult.
+            Future resolved with an OperationResult. An out-of-workspace pose
+            resolves immediately with ``OUT_OF_WORKSPACE``.
         """
         result_future = Future()
+
+        # Validate before touching hardware or taking the movement lock.
+        violations = self.workspace_limits.violations(pose)
+        if violations:
+            message = (
+                "Target pose outside workspace limits: "
+                + "; ".join(violations)
+            )
+            self.node.get_logger().error(message)
+            result_future.set_result(
+                OperationResult(
+                    success=False,
+                    message=message,
+                    error_code=ERROR_OUT_OF_WORKSPACE,
+                )
+            )
+            return result_future
 
         with self._state_lock:
             if self._faulted:
@@ -562,9 +637,9 @@ class DobotActionRobot:
     def reset_fault(self, force: bool = False) -> bool:
         """Attempt to clear a fault so new movements can be issued.
 
-        A plain reset is refused while a movement may still be active; verify
-        the robot is safe (or restart the node) first.  ``force=True`` clears
-        the lock unconditionally and must only be used once the robot has been
+        Plain reset refused while movement may still be active; verify
+        robot safe (or restart node) first.  ``force=True`` clears
+        lock unconditionally and must only be used once robot has been
         verified to be stationary.
 
         Returns:
@@ -576,9 +651,9 @@ class DobotActionRobot:
 
             if self._active_operation is not None and not force:
                 self.node.get_logger().error(
-                    "Cannot reset the robot driver while a movement may still "
-                    "be active. Restart the node, or call "
-                    "reset_fault(force=True) after verifying the robot is safe."
+                    "Cannot reset robot driver while movement may still "
+                    "be active. Restart node, or call "
+                    "reset_fault(force=True) after verifying robot is safe."
                 )
                 return False
 
@@ -595,7 +670,6 @@ class DobotActionRobot:
             self._fault_reason = None
 
         self.node.get_logger().warning(
-            "Robot driver fault cleared. Verify the robot state before the "
-            "next movement."
+            "Robot driver fault cleared. Verify state before next movement."
         )
         return True

@@ -59,6 +59,7 @@ def test_start_service_runs_async_workflow(fail_pick):
             velocity_ratio,
             acceleration_ratio,
             movement_timeout,
+            workspace_limits=None,
         ):
             self.velocity_ratio = velocity_ratio
             self.acceleration_ratio = acceleration_ratio
@@ -269,6 +270,7 @@ def test_start_refused_when_gripper_unavailable():
             velocity_ratio,
             acceleration_ratio,
             movement_timeout,
+            workspace_limits=None,
         ):
             self.velocity_ratio = velocity_ratio
             self.acceleration_ratio = acceleration_ratio
@@ -377,6 +379,30 @@ def test_invalid_parameter_prevents_driver_creation(name, value):
             'depalletizing_pick_place.main_node.GripperClient'
         ) as gripper_class:
             with pytest.raises(RuntimeError, match=name):
+                DepalletizingMainNode(
+                    parameter_overrides=parameters,
+                )
+
+            robot_class.assert_not_called()
+            gripper_class.assert_not_called()
+    finally:
+        rclpy.shutdown()
+
+
+def test_invalid_workspace_limits_prevent_driver_creation():
+    """Reject malformed workspace bounds before creating hardware clients."""
+    parameters = make_test_parameters() + [
+        Parameter('workspace_x_min', value=400.0),
+    ]
+
+    rclpy.init()
+    try:
+        with patch(
+            'depalletizing_pick_place.main_node.DobotActionRobot'
+        ) as robot_class, patch(
+            'depalletizing_pick_place.main_node.GripperClient'
+        ) as gripper_class:
+            with pytest.raises(RuntimeError, match='workspace'):
                 DepalletizingMainNode(
                     parameter_overrides=parameters,
                 )

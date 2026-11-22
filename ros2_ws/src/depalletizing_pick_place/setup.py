@@ -39,6 +39,8 @@ setup(
     entry_points={
         'console_scripts': [
             'depalletizing_node = depalletizing_pick_place.main_node:main',
+            'fake_ptp_action_server = '
+            'depalletizing_pick_place.fake_ptp_action_server:main',
         ],
     },
 )
