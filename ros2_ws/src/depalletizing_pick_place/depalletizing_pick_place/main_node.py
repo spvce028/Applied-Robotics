@@ -237,6 +237,18 @@ class DepalletizingMainNode(Node):
             self.handle_manual_place,
         )
 
+        self.manual_open_gripper_service = self.create_service(
+            Trigger,
+            '/manual/open_gripper',
+            self.handle_manual_open_gripper,
+        )
+
+        self.manual_close_gripper_service = self.create_service(
+            Trigger,
+            '/manual/close_gripper',
+            self.handle_manual_close_gripper,
+        )
+
         self.get_logger().info(
             "Depalletizing node initialized in IDLE state. "
             "Call service '/start_depalletizing' to begin workflow."
@@ -390,6 +402,57 @@ class DepalletizingMainNode(Node):
             lambda: self.pick_place.place_object(self._read_pose('place')),
             response,
         )
+
+    def handle_manual_open_gripper(self, request, response):
+        """Request opening through the same guards as a robot movement."""
+        return self._start_manual_operation(
+            lambda: self._operate_manual_gripper(closed=False),
+            response,
+        )
+
+    def handle_manual_close_gripper(self, request, response):
+        """Request closing through the same guards as a robot movement."""
+        return self._start_manual_operation(
+            lambda: self._operate_manual_gripper(closed=True),
+            response,
+        )
+
+    def _operate_manual_gripper(self, *, closed: bool) -> Future:
+        """Keep the pick/place holding state consistent with manual commands."""
+        operation = (
+            self.gripper.activate_tool if closed
+            else self.gripper.deactivate_tool
+        )
+        result = operation()
+        if isinstance(result, OperationResult):
+            command_future = Future()
+            command_future.set_result(result)
+        elif isinstance(result, Future):
+            command_future = result
+        else:
+            raise TypeError('Gripper must return Future or OperationResult.')
+
+        completed = Future()
+
+        def on_done(future):
+            try:
+                result = future.result()
+                if not isinstance(result, OperationResult):
+                    raise TypeError('Gripper Future must contain OperationResult.')
+
+                if result.success:
+                    # Closed means "may hold an object", not verified grasping.
+                    # Record the real command outcome even after a cancel request.
+                    self.pick_place.holding_object = closed
+
+                # Update holding state BEFORE releasing the shared execution slot.
+                completed.set_result(result)
+            except Exception as error:
+                # The common completion handler logs errors and releases the slot.
+                completed.set_exception(error)
+
+        command_future.add_done_callback(on_done)
+        return completed
 
     def _start_manual_operation(self, operation, response):
         """Accept a manual operation using the shared execution lock."""

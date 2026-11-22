@@ -731,7 +731,7 @@ def test_manual_pick_place_execution(manual_node, action, outcome):
         robot.cancel_current_goal.assert_not_called()
 
 
-@pytest.mark.parametrize('action', ['pick', 'place'])
+@pytest.mark.parametrize('action', ['pick', 'place', 'open_gripper', 'close_gripper'])
 @pytest.mark.parametrize(
     'condition, message',
     [
@@ -744,7 +744,7 @@ def test_manual_pick_place_execution(manual_node, action, outcome):
         ('cancel', 'already running'),
     ],
 )
-def test_manual_pick_place_preconditions(manual_node, action, condition, message):
+def test_manual_operation_preconditions(manual_node, action, condition, message):
     """Apply the shared start guards before any manual hardware command."""
     node, client_node, executor, robot, gripper = manual_node
     assert call_trigger(client_node, executor, '/confirm_homing').success
@@ -764,3 +764,96 @@ def test_manual_pick_place_preconditions(manual_node, action, condition, message
     robot.move_to.assert_not_called()
     gripper.activate_tool.assert_not_called()
     gripper.deactivate_tool.assert_not_called()
+
+
+@pytest.mark.parametrize('closed', [False, True], ids=['open', 'close'])
+@pytest.mark.parametrize(
+    'outcome', ['success', 'failure', 'timeout', 'exception', 'invalid', 'cancel'],
+)
+def test_manual_gripper_execution(manual_node, closed, outcome):
+    """Wait for gripper completion, preserve state on failure and block overlap."""
+    node, client_node, executor, robot, gripper = manual_node
+    command = gripper.activate_tool if closed else gripper.deactivate_tool
+    other_command = gripper.deactivate_tool if closed else gripper.activate_tool
+    pending = Future()
+    command.return_value = pending
+    node.pick_place.holding_object = not closed
+    assert call_trigger(client_node, executor, '/confirm_homing').success
+
+    action = 'close_gripper' if closed else 'open_gripper'
+    assert call_trigger(client_node, executor, f'/manual/{action}').success
+    command.assert_called_once_with()
+    other_command.assert_not_called()
+    assert node._workflow_running
+    assert not pending.done()
+    assert node.pick_place.holding_object == (not closed)
+
+    # All manual actions and the full workflow share the same execution slot.
+    for service in (
+        '/manual/pick', '/manual/place', '/manual/open_gripper',
+        '/manual/close_gripper', '/start_depalletizing',
+    ):
+        assert not call_trigger(client_node, executor, service).success
+    command.assert_called_once_with()
+    other_command.assert_not_called()
+    robot.move_to.assert_not_called()
+
+    if outcome == 'cancel':
+        assert call_trigger(
+            client_node, executor, '/cancel_depalletizing',
+        ).success
+        assert node._cancel_requested.is_set()
+        assert node._workflow_running
+        assert not pending.done()
+        # A sent service command cannot be undone by cancelling robot motion.
+        # Its eventual successful result must still update the holding state.
+
+    if outcome == 'exception':
+        pending.set_exception(RuntimeError('gripper connection lost'))
+    elif outcome == 'invalid':
+        pending.set_result(None)
+    else:
+        succeeded = outcome in ('success', 'cancel')
+        code = None if succeeded else (
+            'TIMEOUT' if outcome == 'timeout' else 'GRIPPER_FAILED'
+        )
+        pending.set_result(OperationResult(succeeded, 'Fake gripper reply', code))
+
+    deadline = time.monotonic() + 5.0
+    while node._workflow_running and time.monotonic() < deadline:
+        executor.spin_once(timeout_sec=0.01)
+    assert not node._workflow_running
+    expected_holding = closed if outcome in ('success', 'cancel') else not closed
+    assert node.pick_place.holding_object == expected_holding
+    command.assert_called_once_with()
+    other_command.assert_not_called()
+    robot.move_to.assert_not_called()
+
+    # Completion frees the slot; a later command can be explicitly accepted.
+    command.return_value = OperationResult(True, 'Explicit retry')
+    assert call_trigger(client_node, executor, f'/manual/{action}').success
+    deadline = time.monotonic() + 5.0
+    while node._workflow_running and time.monotonic() < deadline:
+        executor.spin_once(timeout_sec=0.01)
+    assert not node._workflow_running
+    assert node.pick_place.holding_object == closed
+    assert not node._cancel_requested.is_set()
+    assert command.call_count == 2
+
+
+@pytest.mark.parametrize('closed', [False, True], ids=['open', 'close'])
+def test_manual_gripper_accepts_synchronous_fakes(manual_node, closed):
+    """Keep direct OperationResult support for existing gripper fakes."""
+    node, client_node, executor, robot, gripper = manual_node
+    node.pick_place.holding_object = not closed
+    assert call_trigger(client_node, executor, '/confirm_homing').success
+    action = 'close_gripper' if closed else 'open_gripper'
+    assert call_trigger(client_node, executor, f'/manual/{action}').success
+    deadline = time.monotonic() + 5.0
+    while node._workflow_running and time.monotonic() < deadline:
+        executor.spin_once(timeout_sec=0.01)
+    assert not node._workflow_running
+    assert node.pick_place.holding_object == closed
+    command = gripper.activate_tool if closed else gripper.deactivate_tool
+    command.assert_called_once_with()
+    robot.move_to.assert_not_called()
