@@ -1,4 +1,6 @@
-"""Error codes shared by all depalletizing modules.
+"""
+Error codes shared by all depalletizing modules.
+
 Import constants instead of writing string literals so that code can be
 renamed or added in one place, and every producer and consumer stays in sync.
 """

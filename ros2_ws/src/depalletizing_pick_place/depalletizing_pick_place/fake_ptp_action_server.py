@@ -174,10 +174,14 @@ def main(args=None):
     executor.add_node(node)
     try:
         executor.spin()
+    except KeyboardInterrupt:
+        pass
     finally:
         executor.shutdown()
         node.destroy_node()
-        rclpy.shutdown()
+        # rclpy's signal handler may already have shut down the context.
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":

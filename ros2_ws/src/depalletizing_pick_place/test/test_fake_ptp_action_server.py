@@ -194,9 +194,31 @@ from depalletizing_pick_place import fake_ptp_action_server as fake_server  # no
 _remove_created_stubs()
 
 
+@pytest.fixture(autouse=True)
+def _ros_context():
+    """Initialise real rclpy for these tests; the local stub needs no context."""
+    rclpy_module = _module("rclpy")
+    if not hasattr(rclpy_module, "init"):
+        yield
+        return
+
+    started_here = not rclpy_module.ok()
+    if started_here:
+        rclpy_module.init()
+    yield
+    if started_here:
+        rclpy_module.shutdown()
+
+
 def make_server(clock, **kwargs):
-    """Create a fake server wired to a controllable clock."""
-    with patch.object(fake_server, "Clock", lambda clock_type=None: clock):
+    """Create a fake server with a controllable clock and action server.
+
+    ``Node`` is deliberately not patched: ``super().__init__()`` resolves the
+    original base class, so a real ROS install needs a live rclpy context
+    (provided by the fixture above).
+    """
+    with patch.object(fake_server, "Clock", lambda clock_type=None: clock), \
+            patch.object(fake_server, "ActionServer", FakeActionServer):
         return fake_server.FakePTPActionServer(**kwargs)
 
 
@@ -300,6 +322,8 @@ def test_overlapping_goal_is_aborted():
         first_result = server.execute_callback(first)
 
     assert second.status == "aborted"
-    assert second_results[0].achieved_pose == [0.0, 0.0, 0.0, 0.0]
+    assert second_results[0].achieved_pose == pytest.approx(
+        [0.0, 0.0, 0.0, 0.0]
+    )
     assert first_result.achieved_pose == pytest.approx([10.0, 0.0, 0.0, 0.0])
     assert server._active is None
