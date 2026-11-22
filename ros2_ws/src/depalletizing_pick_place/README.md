@@ -265,3 +265,70 @@ Error codes are defined once in
 `depalletizing_interfaces/depalletizing_interfaces/errors.py`. Import the
 `ERROR_*` constants instead of writing string literals so producers and
 consumers stay in sync.
+
+## Optional transport waypoints
+
+The main node runs `pick -> transport waypoints -> place`. Configure
+`transport_waypoints` in `config/depalletizing.yaml` as a flat numeric list,
+with four values per pose: `[x, y, z, r, x, y, z, r, ...]`. Positions use
+millimetres and rotation uses degrees in `base_link`.
+
+```yaml
+transport_waypoints: []  # No additional transport stage
+```
+
+A non-empty route is executed sequentially with `MOVL`. All poses are checked
+for finite values and against the configured workspace limits before picking.
+The route is snapshotted at each start, so a parameter update does not alter an
+active sequence. Pick/place manual services do not execute transport waypoints.
+
+The transport executor uses the same cancellation signal as pick and place.
+Failure, timeout or cancellation stops the remaining route and prevents place;
+the gripper is not automatically opened. Configure and verify the route for the
+actual cell: workspace bounds do not perform collision checking.
+
+## Controlled shutdown (Ctrl+C / SIGTERM)
+
+The main entry point handles SIGINT and SIGTERM without shutting down the ROS
+context first. It disables new operations, sets the shared cancellation event,
+and requests cancellation of an active robot goal. The executor continues
+processing responses for up to five seconds before ROS entities are destroyed.
+
+Shutdown waits for both workflow completion and the driver's active-movement
+lock to clear. A timeout or lost ROS context produces a warning that standstill
+is not confirmed; it never force-resets the driver. A pending gripper service
+request cannot be cancelled by the robot action cancellation, and shutdown does
+not automatically open the gripper. Previously installed Python signal handlers
+are restored when the entry point exits.
+
+## P5 hardware-free integration checks
+
+From a built and sourced ROS workspace:
+
+```bash
+python3 -m pytest \
+  src/depalletizing_pick_place/test/test_config_contract.py \
+  src/depalletizing_pick_place/test/test_ros_dry_run.py -v -rs
+```
+
+The configuration checks compare required P5 declarations with the shipped
+`depalletizing.yaml` and check that the launch file names that configuration.
+The repository currently has no `lab_params.yaml`, so a comparison against the
+lab configuration still requires that file from P6.
+
+The ROS dry run uses the official P1 `FakePTPActionServer`, the actual robot
+and gripper clients, P4 primitives, P2 waypoint executor and P5 workflow/main
+node. Unique remapped endpoints isolate it from the hardware services. It checks
+startup without motion, rejection before homing and two full consecutive runs
+including transport and gripper command ordering.
+
+The gripper service in this test is explicitly a temporary TEST-ONLY stand-in.
+P3's official fake gripper service and the specified timeout cleanup are not
+present in the current repository. These tests do not certify that missing
+integration or exercise a physical grasp. Replace the stand-in with P3's fake
+when available, then verify timeout recovery and late replies as well.
+
+Current P3 implementation retains `_pending` after timeout and only cancels the
+timer. Its `test_timeout_locks_client` explicitly expects that behavior; this
+must be reconciled with the M2 requirement to clear `_pending` and destroy the
+timer. P5 does not silently modify that component's recovery policy.

@@ -55,52 +55,42 @@ class GripperClient:
                 return future
 
             self._pending = future
-            self._timer = self.node.create_timer(self.timeout_sec, self._on_timeout)
+            self._timer = self.node.create_timer(self.timeout_sec, lambda: self._on_timeout(future))
 
             request = GripperControl.Request(
                 gripper_state=state,
                 keep_compressor_running=self.keep_compressor_running
             )
             try:
-                self._client.call_async(request).add_done_callback(self._on_response)
+                self._client.call_async(request).add_done_callback(lambda f: self._on_response(f, future))
             except Exception as error:
-                self._finish(failed(f"Failed to send gripper command: {error}"))
+                self._finish(future, failed(f"Failed to send gripper command: {error}"))
                 
         return future
 
-    def _on_response(self, service_future):
+    def _on_response(self, service_future, future: Future):
         try:
             response = service_future.result()
         except Exception as error:
-            self._finish(failed(f"Failed to get gripper response: {error}"))
+            self._finish(future, failed(f"Failed to get gripper response: {error}"))
             return
 
         if response.success:
-            self._finish(OperationResult(success=True, message=response.message))
+            self._finish(future, OperationResult(success=True, message=response.message))
         else:
-            self._finish(failed(f"Gripper command failed: {response.message}"))
+            self._finish(future, failed(f"Gripper command failed: {response.message}"))
 
-    def _on_timeout(self):
+    def _on_timeout(self, future: Future):
+        self.node.get_logger().error("Gripper command timed out")
+        self._finish(future, OperationResult(success=False, message="No Gripper response received before timeout", error_code=ERROR_TIMEOUT))
+
+    def _finish(self, future: Future, result: OperationResult):
         with self._lock:
-            if self._timer is not None:
-                self._timer.cancel()
-
-            if self._pending is not None and not self._pending.done():
-                self.node.get_logger().error("Gripper command timed out")
-                self._pending.set_result(OperationResult(
-                    success=False,
-                    message="No Gripper response received before timeout",
-                    error_code=ERROR_TIMEOUT
-                ))
-
-    def _finish(self, result: OperationResult):
-        with self._lock:
+            if self._pending is not future:
+                return
             if self._timer is not None:
                 self.node.destroy_timer(self._timer)
                 self._timer = None
 
-            future = self._pending
             self._pending = None
-
-            if future is not None and not future.done():
-                future.set_result(result)
+            future.set_result(result)

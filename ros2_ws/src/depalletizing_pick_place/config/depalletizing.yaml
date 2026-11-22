@@ -16,6 +16,11 @@ depalletizing_main_node:
     movement_timeout: 30.0
     approach_height: 50.0
 
+    # Optional flat list: [x1, y1, z1, r1, x2, y2, z2, r2, ...].
+    # Units: mm/degrees, base_link. Executed with MOVL after pick, before place.
+    # Empty means no extra transport moves. Configure for the actual cell.
+    transport_waypoints: []
+
     gripper_service_name: "/dobot_gripper_service"
     gripper_timeout: 5.0
     keep_compressor_running: false

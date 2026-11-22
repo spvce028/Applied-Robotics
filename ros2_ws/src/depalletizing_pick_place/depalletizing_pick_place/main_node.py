@@ -1,15 +1,22 @@
 import rclpy
 import threading
 import math
+import signal
+import time
+from array import array
 
+from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.node import Node
-from rclpy.executors import MultiThreadedExecutor
+from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.exceptions import ParameterUninitializedException
+from rclpy.task import Future
+from rclpy.signals import SignalHandlerOptions
 from std_srvs.srv import Trigger
 
 from depalletizing_interfaces.models import OperationResult, RobotPose
 from depalletizing_interfaces.workflow import PickAndPlaceWorkflow
-from depalletizing_pick_place.pick_place import PickPlace
+from depalletizing_interfaces.waypoints import WaypointExecutor
+from depalletizing_pick_place.pick_place import MOVL, PickPlace
 from depalletizing_pick_place.robot_driver import DobotActionRobot, WorkspaceLimits
 from depalletizing_pick_place.gripper_client import GripperClient
 
@@ -43,6 +50,14 @@ class DepalletizingMainNode(Node):
         self.declare_parameter('gripper_service_name', rclpy.Parameter.Type.STRING)
         self.declare_parameter('gripper_timeout', rclpy.Parameter.Type.DOUBLE)
         self.declare_parameter('keep_compressor_running', rclpy.Parameter.Type.BOOL)
+
+        # ROS parameters cannot contain nested lists. Each four numbers form
+        # one pose: [x, y, z, r, x, y, z, r, ...]. Empty means direct pick/place.
+        # Dynamic typing permits an empty YAML list; values are checked below.
+        self.declare_parameter(
+            'transport_waypoints', [],
+            descriptor=ParameterDescriptor(dynamic_typing=True),
+        )
 
         # Optional workspace limits (conservative defaults)
         self.declare_parameter('workspace_x_min', -320.0)
@@ -157,6 +172,10 @@ class DepalletizingMainNode(Node):
             self.get_logger().fatal(message)
             raise RuntimeError(message) from exc
 
+        self._workspace_limits = workspace_limits
+        # Reject malformed/out-of-bounds transport before creating any drivers.
+        self._read_transport_waypoints()
+
         # Initialize drivers
         self.robot = DobotActionRobot(
             self,
@@ -176,6 +195,8 @@ class DepalletizingMainNode(Node):
         )
 
         self._cancel_requested = threading.Event()
+        # Once shutdown starts, no new command may reserve the execution slot.
+        self._shutdown_requested = threading.Event()
 
         self.pick_place = PickPlace(
             self.robot,
@@ -184,10 +205,16 @@ class DepalletizingMainNode(Node):
             is_cancelled=self._cancel_requested.is_set,
         )
 
+        self.waypoint_executor = WaypointExecutor(
+            lambda pose: self.robot.move_to(pose, motion_type=MOVL),
+            is_cancelled=self._cancel_requested.is_set,
+        )
+
         self.workflow = PickAndPlaceWorkflow(
             self.pick_place.pick_object,
             self.pick_place.place_object,
             is_cancelled=self._cancel_requested.is_set,
+            move_through_waypoints=self.waypoint_executor.move_through_waypoints,
         )
 
         self._workflow_running = False
@@ -224,6 +251,30 @@ class DepalletizingMainNode(Node):
             self.handle_reset_fault,
         )
 
+        self.manual_pick_service = self.create_service(
+            Trigger,
+            '/manual/pick',
+            self.handle_manual_pick,
+        )
+
+        self.manual_place_service = self.create_service(
+            Trigger,
+            '/manual/place',
+            self.handle_manual_place,
+        )
+
+        self.manual_open_gripper_service = self.create_service(
+            Trigger,
+            '/manual/open_gripper',
+            self.handle_manual_open_gripper,
+        )
+
+        self.manual_close_gripper_service = self.create_service(
+            Trigger,
+            '/manual/close_gripper',
+            self.handle_manual_close_gripper,
+        )
+
         self.get_logger().info(
             "Depalletizing node initialized in IDLE state. "
             "Call service '/start_depalletizing' to begin workflow."
@@ -233,7 +284,8 @@ class DepalletizingMainNode(Node):
         """Record manual homing confirmation without moving the robot."""
         with self._workflow_lock:
             if (
-                self._workflow_running
+                self._shutdown_requested.is_set()
+                or self._workflow_running
                 or self._cancel_dispatching
                 or self.robot.is_busy
             ):
@@ -300,7 +352,8 @@ class DepalletizingMainNode(Node):
         with self._workflow_lock:
             # Recovery must not overlap a workflow, movement or cancel dispatch.
             if (
-                self._workflow_running
+                self._shutdown_requested.is_set()
+                or self._workflow_running
                 or self._cancel_dispatching
                 or self.robot.is_busy
             ):
@@ -341,6 +394,9 @@ class DepalletizingMainNode(Node):
 
     def _check_preconditions(self) -> str | None:
         """Return a rejection reason or None; caller must hold the lock."""
+        if self._shutdown_requested.is_set():
+            return 'Node is shutting down. New operations are disabled.'
+
         if self._workflow_running or self._cancel_dispatching:
             return 'An operation is already running.'
 
@@ -364,6 +420,151 @@ class DepalletizingMainNode(Node):
 
         return None
 
+    def handle_manual_pick(self, request, response):
+        """Request a pick at the configured source pose."""
+        return self._start_manual_operation(
+            lambda: self.pick_place.pick_object(self._read_pose('pick')),
+            response,
+        )
+
+    def handle_manual_place(self, request, response):
+        """Request placement at the configured target pose."""
+        return self._start_manual_operation(
+            lambda: self.pick_place.place_object(self._read_pose('place')),
+            response,
+        )
+
+    def handle_manual_open_gripper(self, request, response):
+        """Request opening through the same guards as a robot movement."""
+        return self._start_manual_operation(
+            lambda: self._operate_manual_gripper(closed=False),
+            response,
+        )
+
+    def handle_manual_close_gripper(self, request, response):
+        """Request closing through the same guards as a robot movement."""
+        return self._start_manual_operation(
+            lambda: self._operate_manual_gripper(closed=True),
+            response,
+        )
+
+    def _operate_manual_gripper(self, *, closed: bool) -> Future:
+        """Keep the pick/place holding state consistent with manual commands."""
+        operation = (
+            self.gripper.activate_tool if closed
+            else self.gripper.deactivate_tool
+        )
+        result = operation()
+        if isinstance(result, OperationResult):
+            command_future = Future()
+            command_future.set_result(result)
+        elif isinstance(result, Future):
+            command_future = result
+        else:
+            raise TypeError('Gripper must return Future or OperationResult.')
+
+        completed = Future()
+
+        def on_done(future):
+            try:
+                result = future.result()
+                if not isinstance(result, OperationResult):
+                    raise TypeError('Gripper Future must contain OperationResult.')
+
+                if result.success:
+                    # Closed means "may hold an object", not verified grasping.
+                    # Record the real command outcome even after a cancel request.
+                    self.pick_place.holding_object = closed
+
+                # Update holding state BEFORE releasing the shared execution slot.
+                completed.set_result(result)
+            except Exception as error:
+                # The common completion handler logs errors and releases the slot.
+                completed.set_exception(error)
+
+        command_future.add_done_callback(on_done)
+        return completed
+
+    def _start_manual_operation(self, operation, response):
+        """Accept a manual operation using the shared execution lock."""
+        with self._workflow_lock:
+            rejection_reason = self._check_preconditions()
+
+            if rejection_reason is not None:
+                response.success = False
+                response.message = rejection_reason
+                return response
+
+            self._cancel_requested.clear()
+            self._workflow_running = True
+
+        try:
+            # Start outside the lock: completion callbacks may acquire it.
+            result = operation()
+
+            if isinstance(result, OperationResult):
+                future = Future()
+                future.set_result(result)
+            elif isinstance(result, Future):
+                future = result
+            else:
+                raise TypeError(
+                    'Manual operation must return Future or OperationResult.'
+                )
+
+            future.add_done_callback(self._operation_done_callback)
+        except Exception as error:
+            with self._workflow_lock:
+                self._workflow_running = False
+
+            response.success = False
+            response.message = f'Could not start manual operation: {error}'
+            self.get_logger().error(response.message)
+            return response
+
+        response.success = True
+        response.message = 'Manual operation accepted.'
+        return response
+
+    # Helper-Method for shared pose Parameters
+    def _read_pose(self, prefix: str) -> RobotPose:
+        """Read a configured pick or place pose."""
+        return RobotPose(
+            x=self.get_parameter(f'{prefix}_x').value,
+            y=self.get_parameter(f'{prefix}_y').value,
+            z=self.get_parameter(f'{prefix}_z').value,
+            r=self.get_parameter(f'{prefix}_r').value,
+        )
+
+    def _read_transport_waypoints(self) -> tuple[RobotPose, ...]:
+        """Parse and validate every configured transport pose before picking."""
+        values = self.get_parameter('transport_waypoints').value
+        if not isinstance(values, (list, tuple, array)):
+            raise RuntimeError('transport_waypoints must be a numeric list.')
+        if len(values) % 4:
+            raise RuntimeError(
+                'transport_waypoints must contain groups of four: x, y, z, r.'
+            )
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            for value in values
+        ):
+            raise RuntimeError('transport_waypoints must contain finite numbers.')
+
+        poses = []
+        for index in range(0, len(values), 4):
+            pose = RobotPose(*(float(v) for v in values[index:index + 4]))
+            violations = self._workspace_limits.violations(pose)
+            if violations:
+                raise RuntimeError(
+                    f'transport_waypoints pose {index // 4 + 1}: '
+                    + '; '.join(violations)
+                )
+            poses.append(pose)
+        return tuple(poses)
+
     def handle_start_service(self, request, response):
         """Accept a workflow request without blocking for its completion."""
 
@@ -381,28 +582,20 @@ class DepalletizingMainNode(Node):
         try:
 
             # Read pick and place positions from ROS 2 parameters.
-            pick_pose = RobotPose(
-                x=self.get_parameter('pick_x').value,
-                y=self.get_parameter('pick_y').value,
-                z=self.get_parameter('pick_z').value,
-                r=self.get_parameter('pick_r').value,
-            )
-
-            place_pose = RobotPose(
-                x=self.get_parameter('place_x').value,
-                y=self.get_parameter('place_y').value,
-                z=self.get_parameter('place_z').value,
-                r=self.get_parameter('place_r').value,
-            )
+            pick_pose = self._read_pose('pick')
+            place_pose = self._read_pose('place')
+            # Snapshot and validate the whole route before the first movement.
+            transport_poses = self._read_transport_waypoints()
 
             workflow_future = self.workflow.execute_pick_and_place(
 
                 pick_pose,
                 place_pose,
+                transport_waypoints=transport_poses,
             )
 
             workflow_future.add_done_callback(
-                self._workflow_done_callback
+                self._operation_done_callback
             )
 
         except Exception as exc:
@@ -424,52 +617,113 @@ class DepalletizingMainNode(Node):
 
         return response
 
-    def _workflow_done_callback(self, future):
-        """Handle completion of the asynchronous workflow."""
-
+    def _operation_done_callback(self, future):
+        """Handle completion of a workflow or manual operation."""
         try:
             result = future.result()
 
             if not isinstance(result, OperationResult):
                 raise TypeError(
-                    "Workflow must return an OperationResult."
+                    'Operation must return an OperationResult.'
                 )
 
             if result.success:
                 self.get_logger().info(
-                    f"Workflow completed: {result.message}"
+                    f'Operation completed: {result.message}'
                 )
             else:
                 self.get_logger().error(
-                    f"Workflow failed: {result.message}"
+                    f'Operation failed: {result.message}'
                 )
 
         except Exception as exc:
             self.get_logger().error(
-                f"Workflow completion error: {exc}"
+                f'Operation completion error: {exc}'
             )
 
         finally:
             with self._workflow_lock:
                 self._workflow_running = False
 
+    def shutdown_with_cancel(self, executor, timeout_sec: float = 5.0) -> bool:
+        """Request cancellation and process replies before destroying ROS entities."""
+        if not math.isfinite(timeout_sec) or timeout_sec < 0.0:
+            raise ValueError('Shutdown timeout must be finite and non-negative.')
+
+        with self._workflow_lock:
+            self._shutdown_requested.set()
+            self._cancel_requested.set()
+            active = self._workflow_running or self.robot.is_busy
+
+        if active:
+            try:
+                # Keep ROS alive for this request and any late goal acceptance.
+                self.robot.cancel_current_goal()
+            except Exception as error:
+                self.get_logger().error(f'Shutdown cancellation failed: {error}')
+
+        deadline = time.monotonic() + timeout_sec
+        while True:
+            with self._workflow_lock:
+                active = self._workflow_running or self.robot.is_busy
+            if not active:
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0 or not rclpy.ok():
+                break
+            try:
+                # Continue processing terminal movement results and gripper replies.
+                executor.spin_once(timeout_sec=min(0.1, remaining))
+            except ExternalShutdownException:
+                break
+            except Exception as error:
+                self.get_logger().error(f'Shutdown response processing failed: {error}')
+                break
+
+        # Never report a bounded wait as proof that physical motion has stopped.
+        self.get_logger().warning(
+            'Shutdown wait ended with an active or uncertain operation. '
+            'Robot standstill is not confirmed.'
+        )
+        return False
+
+
 def main(args=None):
-    rclpy.init(args=args)
-    node = DepalletizingMainNode()
-
-    # Use MultiThreadedExecutor to prevent deadlocks during synchronous waits / service calls
-    executor = MultiThreadedExecutor()
-    executor.add_node(node)
-
+    # Default ROS signal handlers shut down the context before we can cancel.
+    # Our handlers only set an event; ROS work happens in the normal main loop.
+    stop_requested = threading.Event()
+    previous_handlers = {}
+    node = None
+    executor = None
+    rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
     try:
-        executor.spin()
-    except KeyboardInterrupt:
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            previous_handlers[signum] = signal.signal(
+                signum, lambda _signum, _frame: stop_requested.set(),
+            )
+        node = DepalletizingMainNode()
+        executor = MultiThreadedExecutor()
+        executor.add_node(node)
+        while rclpy.ok() and not stop_requested.is_set():
+            executor.spin_once(timeout_sec=0.1)
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
-        node.destroy_node()
-        # rclpy's signal handler may already have shut down the context.
-        if rclpy.ok():
-            rclpy.shutdown()
+        try:
+            if node is not None and executor is not None:
+                node.shutdown_with_cancel(executor)
+        finally:
+            try:
+                if executor is not None:
+                    executor.shutdown(timeout_sec=1.0)
+            finally:
+                try:
+                    if node is not None:
+                        node.destroy_node()
+                finally:
+                    rclpy.try_shutdown()
+                    for signum, handler in previous_handlers.items():
+                        signal.signal(signum, handler)
 
 
 if __name__ == '__main__':

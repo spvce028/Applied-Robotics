@@ -85,22 +85,33 @@ class TestGripperClient(unittest.TestCase):
 
         self.assertEqual(future.result().error_code, "GRIPPER_FAILED")
 
-    # Checks Timeout calls TIMEOUT and blocks commands until response
-    def test_timeout_locks_client(self):
+    # Checks that timeout releases client & destroys timer
+    def test_timeout_releases_client(self):
         future = self.gripper.activate_tool()
+        timer = self.node.create_timer.return_value
         timeout_callback = self.node.create_timer.call_args[0][1]
         timeout_callback()
-        self.assertEqual(future.result().error_code, "TIMEOUT")
 
-        blocked = self.gripper.deactivate_tool()
-        self.assertEqual(blocked.result().error_code, "GRIPPER_FAILED")
-
-        self.respond(success=True)
         self.assertEqual(future.result().error_code, "TIMEOUT")
+        self.node.destroy_timer.assert_called_with(timer)
 
         self.service.call_async.return_value = Future()
-        self.gripper.deactivate_tool()
+        next_future = self.gripper.deactivate_tool()
         self.assertEqual(self.service.call_async.call_count, 2)
+        self.assertFalse(next_future.done())
+
+    # Checks that late response of a timed-out command is ignored
+    def test_late_response_ignored(self):
+        old_service_future = self.service.call_async.return_value
+        old = self.gripper.activate_tool()
+        self.node.create_timer.call_args[0][1]()
+
+        self.service.call_async.return_value = Future()
+        new = self.gripper.deactivate_tool() 
+
+        old_service_future.set_result(GripperControl.Response(success=True, message="late"))
+        self.assertEqual(old.result().error_code, "TIMEOUT")
+        self.assertFalse(new.done())
 
     # Checks rejection of second command while first is pending
     def test_reject_second_command_while_pending(self):
