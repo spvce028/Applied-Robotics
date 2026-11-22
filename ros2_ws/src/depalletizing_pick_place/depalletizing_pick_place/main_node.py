@@ -1,13 +1,16 @@
 import rclpy
 import threading
 import math
+import signal
+import time
 from array import array
 
 from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.node import Node
-from rclpy.executors import MultiThreadedExecutor
+from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.exceptions import ParameterUninitializedException
 from rclpy.task import Future
+from rclpy.signals import SignalHandlerOptions
 from std_srvs.srv import Trigger
 
 from depalletizing_interfaces.models import OperationResult, RobotPose
@@ -192,6 +195,8 @@ class DepalletizingMainNode(Node):
         )
 
         self._cancel_requested = threading.Event()
+        # Once shutdown starts, no new command may reserve the execution slot.
+        self._shutdown_requested = threading.Event()
 
         self.pick_place = PickPlace(
             self.robot,
@@ -279,7 +284,8 @@ class DepalletizingMainNode(Node):
         """Record manual homing confirmation without moving the robot."""
         with self._workflow_lock:
             if (
-                self._workflow_running
+                self._shutdown_requested.is_set()
+                or self._workflow_running
                 or self._cancel_dispatching
                 or self.robot.is_busy
             ):
@@ -346,7 +352,8 @@ class DepalletizingMainNode(Node):
         with self._workflow_lock:
             # Recovery must not overlap a workflow, movement or cancel dispatch.
             if (
-                self._workflow_running
+                self._shutdown_requested.is_set()
+                or self._workflow_running
                 or self._cancel_dispatching
                 or self.robot.is_busy
             ):
@@ -387,6 +394,9 @@ class DepalletizingMainNode(Node):
 
     def _check_preconditions(self) -> str | None:
         """Return a rejection reason or None; caller must hold the lock."""
+        if self._shutdown_requested.is_set():
+            return 'Node is shutting down. New operations are disabled.'
+
         if self._workflow_running or self._cancel_dispatching:
             return 'An operation is already running.'
 
@@ -635,21 +645,85 @@ class DepalletizingMainNode(Node):
             with self._workflow_lock:
                 self._workflow_running = False
 
+    def shutdown_with_cancel(self, executor, timeout_sec: float = 5.0) -> bool:
+        """Request cancellation and process replies before destroying ROS entities."""
+        if not math.isfinite(timeout_sec) or timeout_sec < 0.0:
+            raise ValueError('Shutdown timeout must be finite and non-negative.')
+
+        with self._workflow_lock:
+            self._shutdown_requested.set()
+            self._cancel_requested.set()
+            active = self._workflow_running or self.robot.is_busy
+
+        if active:
+            try:
+                # Keep ROS alive for this request and any late goal acceptance.
+                self.robot.cancel_current_goal()
+            except Exception as error:
+                self.get_logger().error(f'Shutdown cancellation failed: {error}')
+
+        deadline = time.monotonic() + timeout_sec
+        while True:
+            with self._workflow_lock:
+                active = self._workflow_running or self.robot.is_busy
+            if not active:
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0 or not rclpy.ok():
+                break
+            try:
+                # Continue processing terminal movement results and gripper replies.
+                executor.spin_once(timeout_sec=min(0.1, remaining))
+            except ExternalShutdownException:
+                break
+            except Exception as error:
+                self.get_logger().error(f'Shutdown response processing failed: {error}')
+                break
+
+        # Never report a bounded wait as proof that physical motion has stopped.
+        self.get_logger().warning(
+            'Shutdown wait ended with an active or uncertain operation. '
+            'Robot standstill is not confirmed.'
+        )
+        return False
+
+
 def main(args=None):
-    rclpy.init(args=args)
-    node = DepalletizingMainNode()
-
-    # Use MultiThreadedExecutor to prevent deadlocks during synchronous waits / service calls
-    executor = MultiThreadedExecutor()
-    executor.add_node(node)
-
+    # Default ROS signal handlers shut down the context before we can cancel.
+    # Our handlers only set an event; ROS work happens in the normal main loop.
+    stop_requested = threading.Event()
+    previous_handlers = {}
+    node = None
+    executor = None
+    rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
     try:
-        executor.spin()
-    except KeyboardInterrupt:
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            previous_handlers[signum] = signal.signal(
+                signum, lambda _signum, _frame: stop_requested.set(),
+            )
+        node = DepalletizingMainNode()
+        executor = MultiThreadedExecutor()
+        executor.add_node(node)
+        while rclpy.ok() and not stop_requested.is_set():
+            executor.spin_once(timeout_sec=0.1)
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        try:
+            if node is not None and executor is not None:
+                node.shutdown_with_cancel(executor)
+        finally:
+            try:
+                if executor is not None:
+                    executor.shutdown(timeout_sec=1.0)
+            finally:
+                try:
+                    if node is not None:
+                        node.destroy_node()
+                finally:
+                    rclpy.try_shutdown()
+                    for signum, handler in previous_handlers.items():
+                        signal.signal(signum, handler)
 
 
 if __name__ == '__main__':

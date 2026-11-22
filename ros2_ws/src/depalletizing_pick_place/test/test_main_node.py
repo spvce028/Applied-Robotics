@@ -1,6 +1,8 @@
 """Exercise the real ROS start service with mocked hardware."""
 
 import time
+import signal
+from contextlib import nullcontext
 from unittest.mock import Mock, patch
 
 import pytest
@@ -16,6 +18,7 @@ from std_srvs.srv import Trigger
 
 from depalletizing_interfaces.models import OperationResult
 from depalletizing_pick_place.main_node import DepalletizingMainNode
+from depalletizing_pick_place import main_node as main_node_module
 
 
 # Help-Function for Param-Testing
@@ -746,6 +749,7 @@ def test_manual_pick_place_execution(manual_node, action, outcome):
         ('gripper', 'Gripper'),
         ('workflow', 'already running'),
         ('cancel', 'already running'),
+        ('shutdown', 'shutting down'),
     ],
 )
 def test_manual_operation_preconditions(manual_node, action, condition, message):
@@ -755,6 +759,8 @@ def test_manual_operation_preconditions(manual_node, action, condition, message)
     node._homing_confirmed = condition != 'homing'
     node._workflow_running = condition == 'workflow'
     node._cancel_dispatching = condition == 'cancel'
+    if condition == 'shutdown':
+        node._shutdown_requested.set()
     robot.is_faulted = condition == 'fault'
     robot.is_busy = condition == 'busy'
     robot.server_is_ready.return_value = condition != 'server'
@@ -1015,3 +1021,145 @@ def test_transport_revalidated_before_start(manual_node):
     assert not node._workflow_running
     robot.move_to.assert_not_called()
     gripper.activate_tool.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    'scenario',
+    ['idle', 'completed', 'timeout', 'dispatch_error', 'context_lost', 'spin_error'],
+)
+def test_shutdown_cancellation(manual_node, scenario):
+    """Keep ROS alive for cancel results and bound the wait for uncertain motion."""
+    node, client_node, executor, robot, gripper = manual_node
+    pending = Future()
+    robot.move_to.return_value = pending
+    if scenario != 'idle':
+        assert call_trigger(client_node, executor, '/confirm_homing').success
+        assert call_trigger(client_node, executor, '/start_depalletizing').success
+        robot.is_busy = True
+
+    if scenario == 'completed':
+        # The terminal result arrives only if shutdown keeps spinning the executor.
+        def terminal_reply():
+            timer.cancel()
+            robot.is_busy = False
+            pending.set_result(OperationResult(False, 'Cancelled', 'CANCELLED'))
+
+        timer = node.create_timer(0.01, terminal_reply)
+    if scenario == 'dispatch_error':
+        robot.cancel_current_goal.side_effect = RuntimeError('cancel unavailable')
+
+    context_patch = (
+        patch.object(main_node_module.rclpy, 'ok', return_value=False)
+        if scenario == 'context_lost' else nullcontext()
+    )
+    spin_patch = (
+        patch.object(executor, 'spin_once', side_effect=RuntimeError('executor failed'))
+        if scenario == 'spin_error' else nullcontext()
+    )
+    started = time.monotonic()
+    with context_patch, spin_patch:
+        completed = node.shutdown_with_cancel(
+            executor, timeout_sec=1.0 if scenario == 'completed' else 0.03,
+        )
+    assert time.monotonic() - started < 2.0
+    assert completed == (scenario in ('idle', 'completed'))
+    assert node._shutdown_requested.is_set()
+    assert node._cancel_requested.is_set()
+
+    if scenario == 'idle':
+        robot.cancel_current_goal.assert_not_called()
+        robot.move_to.assert_not_called()
+    else:
+        robot.cancel_current_goal.assert_called_once_with()
+        robot.move_to.assert_called_once()
+    if not completed:
+        # An elapsed wait must not pretend to release an uncertain movement.
+        assert node._workflow_running
+        assert robot.is_busy
+        assert not pending.done()
+
+    # Start, manual operations, homing and reset remain disabled during teardown.
+    for handler in (
+        node.handle_start_service, node.handle_manual_pick,
+        node.handle_manual_place, node.handle_manual_open_gripper,
+        node.handle_manual_close_gripper, node.handle_confirm_homing,
+        node.handle_reset_fault,
+    ):
+        reply = handler(Trigger.Request(), Trigger.Response())
+        assert not reply.success
+    gripper.activate_tool.assert_not_called()
+    gripper.deactivate_tool.assert_not_called()
+    robot.reset_fault.assert_not_called()
+
+
+@pytest.mark.parametrize('timeout', [-1.0, float('inf'), float('nan')])
+def test_invalid_shutdown_timeout(manual_node, timeout):
+    """Reject an unbounded shutdown wait before changing node state."""
+    node, _, executor, robot, _ = manual_node
+    with pytest.raises(ValueError, match='Shutdown timeout'):
+        node.shutdown_with_cancel(executor, timeout_sec=timeout)
+    assert not node._shutdown_requested.is_set()
+    robot.cancel_current_goal.assert_not_called()
+
+
+@pytest.mark.parametrize('scenario', ['sigint', 'sigterm', 'keyboard', 'startup_error'])
+def test_main_signal_cleanup_order(scenario):
+    """Dispatch cancel before destroying ROS and restore prior signal handlers."""
+    node, executor = Mock(), Mock()
+    installed, restored, events = {}, set(), []
+    previous = {signal.SIGINT: object(), signal.SIGTERM: object()}
+
+    def install_signal(signum, handler):
+        if callable(handler):
+            installed[signum] = handler
+        else:
+            assert handler is previous[signum]
+            restored.add(signum)
+        return previous[signum]
+
+    def spin_once(*, timeout_sec):
+        assert timeout_sec <= 0.1
+        if scenario == 'keyboard':
+            raise KeyboardInterrupt()
+        signum = signal.SIGINT if scenario == 'sigint' else signal.SIGTERM
+        installed[signum](signum, None)
+        # Signal handlers themselves must not call drivers or destroy ROS.
+        node.shutdown_with_cancel.assert_not_called()
+        node.destroy_node.assert_not_called()
+
+    executor.spin_once.side_effect = spin_once
+    node.shutdown_with_cancel.side_effect = lambda ex: events.append('cancel')
+    executor.shutdown.side_effect = lambda **kw: events.append('executor')
+    node.destroy_node.side_effect = lambda: events.append('node')
+    with patch.object(main_node_module.rclpy, 'init') as init, patch.object(
+        main_node_module.rclpy, 'ok', return_value=True,
+    ), patch.object(
+        main_node_module.rclpy, 'try_shutdown',
+        side_effect=lambda: events.append('context'),
+    ), patch.object(
+        main_node_module.signal, 'signal', side_effect=install_signal,
+    ), patch.object(
+        main_node_module, 'DepalletizingMainNode', return_value=node,
+    ) as node_class, patch.object(
+        main_node_module, 'MultiThreadedExecutor', return_value=executor,
+    ) as executor_class:
+        if scenario == 'startup_error':
+            node_class.side_effect = RuntimeError('invalid configuration')
+        expected = (
+            pytest.raises(RuntimeError, match='invalid configuration')
+            if scenario == 'startup_error' else nullcontext()
+        )
+        with expected:
+            main_node_module.main(args=[])
+        init.assert_called_once_with(
+            args=[],
+            signal_handler_options=main_node_module.SignalHandlerOptions.NO,
+        )
+
+    assert restored == set(previous)
+    if scenario == 'startup_error':
+        executor_class.assert_not_called()
+        assert events == ['context']
+    else:
+        node.shutdown_with_cancel.assert_called_once_with(executor)
+        assert events == ['cancel', 'executor', 'node', 'context']

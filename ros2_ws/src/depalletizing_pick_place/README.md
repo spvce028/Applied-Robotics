@@ -286,3 +286,17 @@ The transport executor uses the same cancellation signal as pick and place.
 Failure, timeout or cancellation stops the remaining route and prevents place;
 the gripper is not automatically opened. Configure and verify the route for the
 actual cell: workspace bounds do not perform collision checking.
+
+## Controlled shutdown (Ctrl+C / SIGTERM)
+
+The main entry point handles SIGINT and SIGTERM without shutting down the ROS
+context first. It disables new operations, sets the shared cancellation event,
+and requests cancellation of an active robot goal. The executor continues
+processing responses for up to five seconds before ROS entities are destroyed.
+
+Shutdown waits for both workflow completion and the driver's active-movement
+lock to clear. A timeout or lost ROS context produces a warning that standstill
+is not confirmed; it never force-resets the driver. A pending gripper service
+request cannot be cancelled by the robot action cancellation, and shutdown does
+not automatically open the gripper. Previously installed Python signal handlers
+are restored when the entry point exits.
