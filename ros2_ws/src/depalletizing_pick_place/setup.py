@@ -41,6 +41,8 @@ setup(
             'depalletizing_node = depalletizing_pick_place.main_node:main',
             'fake_ptp_action_server = '
             'depalletizing_pick_place.fake_ptp_action_server:main',
+            'fake_gripper_service = '
+            'depalletizing_pick_place.fake_gripper_service:main',
         ],
     },
 )
