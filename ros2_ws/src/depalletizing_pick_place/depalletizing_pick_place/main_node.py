@@ -1,7 +1,9 @@
 import rclpy
 import threading
 import math
+from array import array
 
+from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.exceptions import ParameterUninitializedException
@@ -10,7 +12,8 @@ from std_srvs.srv import Trigger
 
 from depalletizing_interfaces.models import OperationResult, RobotPose
 from depalletizing_interfaces.workflow import PickAndPlaceWorkflow
-from depalletizing_pick_place.pick_place import PickPlace
+from depalletizing_interfaces.waypoints import WaypointExecutor
+from depalletizing_pick_place.pick_place import MOVL, PickPlace
 from depalletizing_pick_place.robot_driver import DobotActionRobot, WorkspaceLimits
 from depalletizing_pick_place.gripper_client import GripperClient
 
@@ -44,6 +47,14 @@ class DepalletizingMainNode(Node):
         self.declare_parameter('gripper_service_name', rclpy.Parameter.Type.STRING)
         self.declare_parameter('gripper_timeout', rclpy.Parameter.Type.DOUBLE)
         self.declare_parameter('keep_compressor_running', rclpy.Parameter.Type.BOOL)
+
+        # ROS parameters cannot contain nested lists. Each four numbers form
+        # one pose: [x, y, z, r, x, y, z, r, ...]. Empty means direct pick/place.
+        # Dynamic typing permits an empty YAML list; values are checked below.
+        self.declare_parameter(
+            'transport_waypoints', [],
+            descriptor=ParameterDescriptor(dynamic_typing=True),
+        )
 
         # Optional workspace limits (conservative defaults)
         self.declare_parameter('workspace_x_min', -320.0)
@@ -158,6 +169,10 @@ class DepalletizingMainNode(Node):
             self.get_logger().fatal(message)
             raise RuntimeError(message) from exc
 
+        self._workspace_limits = workspace_limits
+        # Reject malformed/out-of-bounds transport before creating any drivers.
+        self._read_transport_waypoints()
+
         # Initialize drivers
         self.robot = DobotActionRobot(
             self,
@@ -185,10 +200,16 @@ class DepalletizingMainNode(Node):
             is_cancelled=self._cancel_requested.is_set,
         )
 
+        self.waypoint_executor = WaypointExecutor(
+            lambda pose: self.robot.move_to(pose, motion_type=MOVL),
+            is_cancelled=self._cancel_requested.is_set,
+        )
+
         self.workflow = PickAndPlaceWorkflow(
             self.pick_place.pick_object,
             self.pick_place.place_object,
             is_cancelled=self._cancel_requested.is_set,
+            move_through_waypoints=self.waypoint_executor.move_through_waypoints,
         )
 
         self._workflow_running = False
@@ -505,6 +526,35 @@ class DepalletizingMainNode(Node):
             r=self.get_parameter(f'{prefix}_r').value,
         )
 
+    def _read_transport_waypoints(self) -> tuple[RobotPose, ...]:
+        """Parse and validate every configured transport pose before picking."""
+        values = self.get_parameter('transport_waypoints').value
+        if not isinstance(values, (list, tuple, array)):
+            raise RuntimeError('transport_waypoints must be a numeric list.')
+        if len(values) % 4:
+            raise RuntimeError(
+                'transport_waypoints must contain groups of four: x, y, z, r.'
+            )
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            for value in values
+        ):
+            raise RuntimeError('transport_waypoints must contain finite numbers.')
+
+        poses = []
+        for index in range(0, len(values), 4):
+            pose = RobotPose(*(float(v) for v in values[index:index + 4]))
+            violations = self._workspace_limits.violations(pose)
+            if violations:
+                raise RuntimeError(
+                    f'transport_waypoints pose {index // 4 + 1}: '
+                    + '; '.join(violations)
+                )
+            poses.append(pose)
+        return tuple(poses)
+
     def handle_start_service(self, request, response):
         """Accept a workflow request without blocking for its completion."""
 
@@ -524,11 +574,14 @@ class DepalletizingMainNode(Node):
             # Read pick and place positions from ROS 2 parameters.
             pick_pose = self._read_pose('pick')
             place_pose = self._read_pose('place')
+            # Snapshot and validate the whole route before the first movement.
+            transport_poses = self._read_transport_waypoints()
 
             workflow_future = self.workflow.execute_pick_and_place(
 
                 pick_pose,
                 place_pose,
+                transport_waypoints=transport_poses,
             )
 
             workflow_future.add_done_callback(

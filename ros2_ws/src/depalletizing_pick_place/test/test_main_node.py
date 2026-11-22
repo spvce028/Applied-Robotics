@@ -598,7 +598,7 @@ def test_reset_fault_service(scenario):
 
 
 @pytest.fixture
-def manual_node():
+def manual_node(request):
     """Provide a real ROS node and executor with fake hardware clients."""
     robot = Mock()
     robot.is_faulted = False
@@ -619,6 +619,10 @@ def manual_node():
             p for p in make_test_parameters() if p.name != 'approach_height'
         ]
         parameters.append(Parameter('approach_height', value=65.0))
+        # Individual tests can supply additional configuration before node startup.
+        for name, value in getattr(request, 'param', {}).items():
+            parameters = [p for p in parameters if p.name != name]
+            parameters.append(Parameter(name, value=value))
         with patch(
             'depalletizing_pick_place.main_node.DobotActionRobot',
             return_value=robot,
@@ -857,3 +861,157 @@ def test_manual_gripper_accepts_synchronous_fakes(manual_node, closed):
     command = gripper.activate_tool if closed else gripper.deactivate_tool
     command.assert_called_once_with()
     robot.move_to.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    'values',
+    [
+        [200.0, 0.0, 150.0],
+        [float('nan'), 0.0, 150.0, 0.0],
+        [200.0, 0.0, float('inf'), 0.0],
+        [999.0, 0.0, 150.0, 0.0],
+        [200.0, 0.0, 999.0, 0.0],
+        [True, False, True, False],
+        ['x', 'y', 'z', 'r'],
+        'not a list',
+        1.0,
+    ],
+)
+def test_invalid_transport_prevents_driver_creation(values):
+    """Reject an invalid complete route before any hardware client exists."""
+    parameters = make_test_parameters()
+    parameters.append(Parameter('transport_waypoints', value=values))
+    rclpy.init()
+    try:
+        with patch(
+            'depalletizing_pick_place.main_node.DobotActionRobot',
+        ) as robot_class, patch(
+            'depalletizing_pick_place.main_node.GripperClient',
+        ) as gripper_class:
+            with pytest.raises(RuntimeError, match='transport_waypoints'):
+                DepalletizingMainNode(parameter_overrides=parameters)
+            robot_class.assert_not_called()
+            gripper_class.assert_not_called()
+    finally:
+        rclpy.shutdown()
+
+
+@pytest.mark.parametrize('outcome', ['success', 'failure', 'timeout', 'cancel'])
+@pytest.mark.parametrize(
+    'manual_node',
+    [{'transport_waypoints': [
+        210.0, 20.0, 150.0, 0.0,
+        240.0, 80.0, 150.0, 15.0,
+    ]}],
+    indirect=True,
+)
+def test_full_workflow_transport(manual_node, outcome):
+    """Insert sequential transport between pick and place and stop on errors."""
+    node, client_node, executor, robot, gripper = manual_node
+    movements = []
+    events = []
+
+    def move_to(pose, motion_type=1):
+        pending = Future()
+        movements.append((pose, motion_type, pending))
+        events.append('move')
+        robot.is_busy = True
+        return pending
+
+    def close():
+        events.append('close')
+        return OperationResult(True, 'Closed')
+
+    def open_gripper():
+        events.append('open')
+        return OperationResult(True, 'Opened')
+
+    robot.move_to.side_effect = move_to
+    gripper.activate_tool.side_effect = close
+    gripper.deactivate_tool.side_effect = open_gripper
+    assert call_trigger(client_node, executor, '/confirm_homing').success
+    assert call_trigger(client_node, executor, '/start_depalletizing').success
+    assert len(movements) == 1
+    assert not movements[0][2].done()
+
+    completed = 0
+    deadline = time.monotonic() + 5.0
+    while node._workflow_running and time.monotonic() < deadline:
+        if completed < len(movements):
+            # First three moves are pick; index 3 is the first transport move.
+            transporting = completed == 3
+            if transporting:
+                assert node.workflow.status == 'transporting'
+                assert node.pick_place.holding_object
+                assert gripper.activate_tool.call_count == 1
+                gripper.deactivate_tool.assert_not_called()
+                if outcome == 'cancel':
+                    assert call_trigger(
+                        client_node, executor, '/cancel_depalletizing',
+                    ).success
+                    robot.cancel_current_goal.assert_called_once()
+                    assert node._workflow_running
+
+            success = not (transporting and outcome in ('failure', 'timeout'))
+            code = None if success else (
+                'TIMEOUT' if outcome == 'timeout' else 'MOVE_FAILED'
+            )
+            robot.is_busy = False
+            # A late successful reply must not continue transport after cancel.
+            movements[completed][2].set_result(
+                OperationResult(success, 'Fake movement reply', code)
+            )
+            completed += 1
+        executor.spin_once(timeout_sec=0.01)
+
+    assert not node._workflow_running
+    assert completed == len(movements)
+    assert [(p.x, p.y, p.z, p.r, motion) for p, motion, _ in movements[:4]] == [
+        (200.0, 0.0, 115.0, 0.0, 1),
+        (200.0, 0.0, 50.0, 0.0, 2),
+        (200.0, 0.0, 115.0, 0.0, 2),
+        (210.0, 20.0, 150.0, 0.0, 2),
+    ]
+    if outcome == 'success':
+        assert node.workflow.status == 'completed'
+        assert [(p.x, p.y, p.z, p.r, motion) for p, motion, _ in movements[4:]] == [
+            (240.0, 80.0, 150.0, 15.0, 2),
+            (250.0, 100.0, 115.0, 0.0, 1),
+            (250.0, 100.0, 50.0, 0.0, 2),
+            (250.0, 100.0, 115.0, 0.0, 2),
+        ]
+        assert events == [
+            'move', 'move', 'close', 'move', 'move',
+            'move', 'move', 'move', 'open', 'move',
+        ]
+        assert not node.pick_place.holding_object
+    else:
+        assert len(movements) == 4
+        assert node.workflow.status == (
+            'cancelled' if outcome == 'cancel' else 'failed'
+        )
+        gripper.deactivate_tool.assert_not_called()
+        assert node.pick_place.holding_object
+
+
+@pytest.mark.parametrize('manual_node', [{'transport_waypoints': []}], indirect=True)
+def test_empty_transport_is_optional(manual_node):
+    """An explicit empty ROS array produces no extra transport movements."""
+    node, _, _, _, _ = manual_node
+    assert node._read_transport_waypoints() == ()
+
+
+def test_transport_revalidated_before_start(manual_node):
+    """Reject invalid route updates before even the first pick movement."""
+    node, client_node, executor, robot, gripper = manual_node
+    result = node.set_parameters([
+        Parameter('transport_waypoints', value=[999.0, 0.0, 150.0, 0.0]),
+    ])
+    assert result[0].successful
+    assert call_trigger(client_node, executor, '/confirm_homing').success
+    reply = call_trigger(client_node, executor, '/start_depalletizing')
+    assert not reply.success
+    assert 'transport_waypoints' in reply.message
+    assert not node._workflow_running
+    robot.move_to.assert_not_called()
+    gripper.activate_tool.assert_not_called()

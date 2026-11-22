@@ -265,3 +265,24 @@ Error codes are defined once in
 `depalletizing_interfaces/depalletizing_interfaces/errors.py`. Import the
 `ERROR_*` constants instead of writing string literals so producers and
 consumers stay in sync.
+
+## Optional transport waypoints
+
+The main node runs `pick -> transport waypoints -> place`. Configure
+`transport_waypoints` in `config/depalletizing.yaml` as a flat numeric list,
+with four values per pose: `[x, y, z, r, x, y, z, r, ...]`. Positions use
+millimetres and rotation uses degrees in `base_link`.
+
+```yaml
+transport_waypoints: []  # No additional transport stage
+```
+
+A non-empty route is executed sequentially with `MOVL`. All poses are checked
+for finite values and against the configured workspace limits before picking.
+The route is snapshotted at each start, so a parameter update does not alter an
+active sequence. Pick/place manual services do not execute transport waypoints.
+
+The transport executor uses the same cancellation signal as pick and place.
+Failure, timeout or cancellation stops the remaining route and prevents place;
+the gripper is not automatically opened. Configure and verify the route for the
+actual cell: workspace bounds do not perform collision checking.
