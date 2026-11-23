@@ -1,18 +1,18 @@
 
 depalletizing_main_node:
   ros__parameters:
-    pick_x: 200.0
-    pick_y: 0.0
-    pick_z: 50.0
-    pick_r: 0.0
+    pick_x: 211.5
+    pick_y: -21.6
+    pick_z: 17.2
+    pick_r: -5.8
 
-    place_x: 250.0
-    place_y: 100.0
-    place_z: 50.0
-    place_r: 0.0
+    place_x: 153.3
+    place_y: -146.9
+    place_z: 21.5
+    place_r: -43.8
 
-    velocity_ratio: 0.4
-    acceleration_ratio: 0.4
+    velocity_ratio: 0.2
+    acceleration_ratio: 0.2
     movement_timeout: 30.0
     approach_height: 50.0
 

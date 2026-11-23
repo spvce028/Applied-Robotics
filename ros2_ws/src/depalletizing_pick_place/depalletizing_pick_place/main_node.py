@@ -539,6 +539,9 @@ class DepalletizingMainNode(Node):
     def _read_transport_waypoints(self) -> tuple[RobotPose, ...]:
         """Parse and validate every configured transport pose before picking."""
         values = self.get_parameter('transport_waypoints').value
+        # An empty YAML list ("[]") cannot be typed by ROS and arrives as NOT_SET.
+        if values is None:
+            values = []
         if not isinstance(values, (list, tuple, array)):
             raise RuntimeError('transport_waypoints must be a numeric list.')
         if len(values) % 4:

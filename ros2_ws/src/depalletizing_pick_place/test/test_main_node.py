@@ -3,6 +3,7 @@
 import time
 import signal
 from contextlib import nullcontext
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
@@ -1005,6 +1006,27 @@ def test_empty_transport_is_optional(manual_node):
     """An explicit empty ROS array produces no extra transport movements."""
     node, _, _, _, _ = manual_node
     assert node._read_transport_waypoints() == ()
+
+
+def test_shipped_yaml_starts_node():
+    """The shipped params file (empty YAML list -> NOT_SET) must not crash startup."""
+    config = (
+        Path(__file__).resolve().parents[1] / 'config' / 'depalletizing.yaml'
+    )
+    rclpy.init(args=['--ros-args', '--params-file', str(config)])
+    try:
+        with patch(
+            'depalletizing_pick_place.main_node.DobotActionRobot',
+        ), patch(
+            'depalletizing_pick_place.main_node.GripperClient',
+        ):
+            node = DepalletizingMainNode()
+            try:
+                assert node._read_transport_waypoints() == ()
+            finally:
+                node.destroy_node()
+    finally:
+        rclpy.shutdown()
 
 
 def test_transport_revalidated_before_start(manual_node):
