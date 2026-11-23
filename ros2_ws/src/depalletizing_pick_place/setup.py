@@ -43,6 +43,7 @@ setup(
             'depalletizing_pick_place.fake_ptp_action_server:main',
             'fake_gripper_service = '
             'depalletizing_pick_place.fake_gripper_service:main',
+            'm2_lab_test = depalletizing_pick_place.m2_lab_test:main',
         ],
     },
 )

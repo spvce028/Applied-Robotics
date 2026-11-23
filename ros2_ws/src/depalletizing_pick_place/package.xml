@@ -13,6 +13,8 @@
   <depend>depalletizing_interfaces</depend>
   <depend>dobot_msgs</depend>
   <depend>std_srvs</depend>
+  <depend>std_msgs</depend>
+  <exec_depend>ament_index_python</exec_depend>
 
   <test_depend>python3-pytest</test_depend>
   <test_depend>python3-yaml</test_depend>
