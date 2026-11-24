@@ -9,10 +9,14 @@ yaml = pytest.importorskip('yaml')
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_yaml_matches_main_node_parameters():
-    """Keep required parameter names and types aligned with the shipped YAML."""
+@pytest.mark.parametrize(
+    'config_name',
+    ['depalletizing.yaml', 'simulation.yaml'],
+)
+def test_yaml_matches_main_node_parameters(config_name):
+    """Keep both shipped configurations aligned with main-node parameters."""
     config = yaml.safe_load(
-        (PACKAGE_ROOT / 'config' / 'depalletizing.yaml').read_text(encoding='utf-8')
+        (PACKAGE_ROOT / 'config' / config_name).read_text(encoding='utf-8')
     )
     assert set(config) == {'depalletizing_main_node'}
     values = config['depalletizing_main_node']['ros__parameters']
@@ -41,11 +45,17 @@ def test_yaml_matches_main_node_parameters():
 
 
 def test_launch_uses_shipped_configuration():
-    """Verify that the launch file points to the checked YAML and node name."""
+    """Verify that launch references both configurations and the node name."""
     launch_file = PACKAGE_ROOT / 'launch' / 'depalletizing.launch.py'
     tree = ast.parse(launch_file.read_text(encoding='utf-8-sig'))
     constants = {
         n.value for n in ast.walk(tree)
         if isinstance(n, ast.Constant) and isinstance(n.value, str)
     }
-    assert {'config', 'depalletizing.yaml', 'depalletizing_main_node'} <= constants
+    assert {
+        'config',
+        'simulation',
+        'depalletizing.yaml',
+        'simulation.yaml',
+        'depalletizing_main_node',
+    } <= constants
