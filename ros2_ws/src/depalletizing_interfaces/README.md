@@ -63,7 +63,9 @@ Available codes: `BUSY`, `FAULTED`, `SERVER_UNAVAILABLE`, `GOAL_REJECTED`,
 
 ## 2. Mock Components
 
-The package provides simulated robot and gripper implementations for testing without physical hardware.
+The package provides in-process robot and gripper mocks for testing without
+physical hardware. They do not create ROS action/service servers. The
+`depalletizing_pick_place` package supplies those simulation nodes separately.
 
 ### MockRobot
 
@@ -76,6 +78,9 @@ result = robot.move_to(RobotPose(200, 0, 50, 0))
 ```
 
 Set `robot.should_fail = True` to simulate a movement failure.
+
+`MockRobot.move_to(pose, motion_type=1)` also records the requested motion type
+in `motion_types` and successful target poses in `movement_history`.
 
 ### MockGripper
 
@@ -95,13 +100,20 @@ A successful mock gripper command does not verify that a physical object has bee
 
 The production interfaces are asynchronous:
 
-```python
-move_to(pose: RobotPose) -> Future[OperationResult]
+```text
+move_to(pose: RobotPose, motion_type: int = 1) -> Future[OperationResult]
 activate_tool() -> Future[OperationResult]
 deactivate_tool() -> Future[OperationResult]
 ```
 
-The returned future completes only after the operation reaches a terminal state: success, failure, timeout, rejection, or cancellation.
+`Future[OperationResult]` describes the result contract: an `rclpy.task.Future`
+whose result is an `OperationResult`.
+
+A completed future reports the component's outcome, including immediate
+rejection, failure or timeout. It does not always prove that a physical
+operation has ended. In particular, the robot driver reports timeout before
+it receives a terminal action result and retains its movement lock meanwhile.
+Requesting cancellation also does not itself confirm standstill.
 
 The mock components may return `OperationResult` directly. The sequencing classes accept these synchronous results for hardware-free testing.
 
@@ -125,15 +137,22 @@ sequence_future = executor.move_through_waypoints(
     transport_waypoints
 )
 
-result = sequence_future.result()
+def on_transport_done(future):
+    result = future.result()
+    if result.success:
+        print("Transport completed")
+    else:
+        print(result.error_code, result.message)
 
-if result.success:
-    print("Transport completed")
-else:
-    print(result.error_code, result.message)
+
+sequence_future.add_done_callback(on_transport_done)
 ```
 
 The coordinates above are examples only. Real transport waypoints must come from the ROS configuration and must be verified on the physical robot.
+
+The example uses synchronous mocks. With real clients, keep the ROS executor
+running so movement results and continuation callbacks can be processed; do not
+assume that the returned future is already complete.
 
 The executor:
 
@@ -145,11 +164,19 @@ The executor:
 
 Cancellation of an active movement is handled by the robot driver. The executor prevents remaining waypoints from starting after cancellation.
 
-The intended integration sequence is:
+`PickAndPlaceWorkflow` implements the following integration sequence:
 
 ```text
 pick -> transport waypoints -> place
 ```
+
+It receives pick/place functions and an optional `move_through_waypoints`
+function at construction. `execute_pick_and_place(source, target,
+transport_waypoints=())` returns a future and rejects overlapping calls with
+`WORKFLOW_BUSY`. It tracks `idle`, `running`, `picking`, `transporting`,
+`placing`, `completed`, `failed` and `cancelled` states. An empty transport
+list skips that phase. Failure or cancellation prevents later phases; an
+object may still be held. Active motion cancellation belongs to the driver.
 
 ## 5. Build Instructions
 
@@ -180,6 +207,7 @@ All team members should use the same coordinate conventions and shared result ty
 - Position: millimeters
 - Rotation: degrees
 - Default coordinate frame: `base_link`
+- `frame_id` is metadata; these helpers do not perform coordinate transforms.
 - Transport waypoints must be loaded from configuration.
 - A successful result indicates completion according to the component implementation.
 - Mock components do not control physical hardware.

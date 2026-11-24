@@ -22,18 +22,21 @@ against timeouts, cancellation, and uncertain robot states.
 | Cancellation | `cancel_current_goal()` requests cancellation of the active goal |
 | Faults | Uncertain states fault the driver; recover with `reset_fault()` or restart |
 | Workspace | Poses outside configured limits are rejected before a goal is sent |
-| Feedback | Latest `current_pose` is stored in `last_feedback` and logged |
+| Feedback | Latest `current_pose` is available in `last_feedback` while a goal is active |
 
 ## 2. Requirements
 
 - ROS 2 (Humble) with `rclpy`
 - `dobot_msgs` (`PointToPoint` action) and `action_msgs`
 - The `depalletizing_interfaces` package (`RobotPose`, `OperationResult`)
+- A robot action server and gripper service, either hardware drivers or the
+  included simulation nodes
 
 ## 3. Constructing the Driver
 
-All motion settings are configurable; the defaults match the original
-hardcoded values.
+The following defaults belong to the Python driver constructor. The main node
+requires explicit motion settings through ROS parameters and passes them to
+the driver; it does not use these constructor defaults as fallback configuration.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -152,12 +155,15 @@ if robot.is_faulted:
 - `reset_fault()` clears the fault once no movement is active.
 - `reset_fault(force=True)` clears the lock unconditionally; only use it after
   verifying the robot is stationary.
-- If a movement can never reach a terminal result, restart the node.
+- If a movement can never reach a terminal result, recovery requires verifying
+  the robot's physical state. A node restart alone does not stop robot motion.
 
 ## 8. Feedback
 
 While a movement is running the server publishes its current pose. The driver
-stores the most recent value and logs changes at debug level.
+stores the most recent value for the active operation and logs changes at debug
+level. `last_feedback` returns `None` once that operation is released, so collect
+feedback during motion if it is needed after completion.
 
 ```python
 latest = robot.last_feedback   # [x, y, z, r] in mm/degrees, or None
@@ -214,28 +220,105 @@ limits) are rejected.
 
 `fake_ptp_action_server.py` provides a ROS action server with the same
 `PointToPoint` interface as the real driver. It publishes interpolated
-feedback, honours cancellation, and returns `achieved_pose`.
+feedback, exposes a cancellation callback, and returns `achieved_pose`.
 
 ```bash
 ros2 run depalletizing_pick_place fake_ptp_action_server
 ```
 
-Run it with a `MultiThreadedExecutor` (as `main()` does) so cancel requests
-can be processed while a movement is simulated. The server name, feedback
+Run it with a `MultiThreadedExecutor` (as `main()` does). The server name, feedback
 interval and movement duration can be overridden with the `action_name`,
 `feedback_interval` and `movement_duration` node parameters.
 
-The fake server replaces the PTP action server only. A gripper service is
-still required by the main node; either run the real gripper node or provide a
-matching `dobot_msgs/srv/GripperControl` service.
+The server's unit tests exercise cancellation directly. The current ROS dry-run
+tests cover successful complete runs, not cancellation during an active action;
+end-to-end cancellation timing with this server still needs verification.
+
+For a complete hardware-free setup, run the included gripper service in a
+second sourced terminal:
+
+```bash
+ros2 run depalletizing_pick_place fake_gripper_service
+```
+
+It provides the same `dobot_msgs/srv/GripperControl` interface as the real
+gripper on `/dobot_gripper_service`. Its `mode` parameter supports `success`,
+`fail` and `no_response`. The latter delays the reply for 30 seconds to exercise
+client timeouts and late replies. For example:
+
+```bash
+ros2 param set /fake_gripper_service mode fail
+ros2 param set /fake_gripper_service mode success
+```
+
+Start the configured main node in another sourced terminal:
+
+```bash
+ros2 launch depalletizing_pick_place depalletizing.launch.py
+```
+
+The launch file currently starts only the main node; the two simulation
+servers are started separately. After startup, no motion occurs until homing
+is confirmed and an explicit manual or workflow command is received. Use the
+fake servers instead of hardware servers on these endpoints during simulation.
 
 ## 12. Integration
 
 - `PickPlace` (`pick_place.py`) chains `move_to()` and gripper calls and stops
   on the first failure, cancellation, or timeout.
 - `DepalletizingMainNode` (`main_node.py`) owns the driver, the gripper, and
-  the workflow, and refuses to start while `is_faulted` is `True` or the
-  server/gripper is unavailable.
+  the workflow. Commands are rejected before homing confirmation, during
+  shutdown, while another operation/cancel dispatch is active, while the robot
+  is busy or faulted, or when the robot server/gripper service is unavailable.
+
+### Configuration and services
+
+Start with the configuration loaded:
+
+```bash
+ros2 launch depalletizing_pick_place depalletizing.launch.py
+```
+
+Required parameters are `pick_x/y/z/r`, `place_x/y/z/r`, `velocity_ratio`,
+`acceleration_ratio`, `movement_timeout`, `approach_height`,
+`gripper_service_name`, `gripper_timeout` and `keep_compressor_running`.
+The shorthand `pick_x/y/z/r` means four separate names: `pick_x`, `pick_y`,
+`pick_z`, `pick_r`; the same applies to place. Missing or invalid values abort
+initialization. The compressor setting must be chosen for the actual lab setup.
+Workspace limits and transport waypoints are optional; their configuration is
+described below.
+
+Pick/place poses and transport waypoints are read for each workflow start.
+Driver settings, gripper settings, workspace limits and approach height are
+applied when components are constructed; restart the node after changing them.
+Parameter updates do not automatically reconfigure those component instances.
+
+| Trigger service | Purpose |
+|---|---|
+| `/confirm_homing` | Record prior manual homing; performs no movement |
+| `/start_depalletizing` | Accept the complete pick/transport/place workflow |
+| `/manual/pick` | Pick at the configured source pose |
+| `/manual/place` | Place at the configured target pose |
+| `/manual/open_gripper` | Open the gripper |
+| `/manual/close_gripper` | Close the gripper |
+| `/cancel_depalletizing` | Request cancellation and prevent subsequent steps |
+| `/reset_fault` | Reset an idle faulted driver without forcing its lock open |
+
+All services use `std_srvs/srv/Trigger`. For example, after actual homing on
+hardware (or simulated confirmation when using the fake servers):
+
+```bash
+ros2 service call /confirm_homing std_srvs/srv/Trigger '{}'
+ros2 service call /start_depalletizing std_srvs/srv/Trigger '{}'
+```
+
+Manual commands and full workflows share one execution slot. Start/manual
+responses acknowledge acceptance; final success or failure is logged by the
+main node. A cancel response acknowledges a request, not confirmed standstill.
+Reset is refused during active operations, never uses `force=True`, and clears
+the previous homing confirmation when recovering a fault. After successful
+manual closing, the holding state conservatively means an object may be held;
+it is not a sensor-based grasp verification.
 
 ## 13. Build and Test
 
@@ -244,9 +327,13 @@ Run from the repository root:
 ```bash
 source /opt/ros/humble/setup.bash
 cd ros2_ws
-colcon build --packages-select depalletizing_pick_place --symlink-install
+colcon build --symlink-install
 source install/setup.bash
 ```
+
+This builds the source dependencies as well. Ensure the pinned external
+dependency from the repository's `dependencies.repos` has been imported and its
+requirements installed, or use the Docker image which performs those steps.
 
 ```bash
 colcon test --packages-select depalletizing_pick_place
@@ -301,7 +388,7 @@ request cannot be cancelled by the robot action cancellation, and shutdown does
 not automatically open the gripper. Previously installed Python signal handlers
 are restored when the entry point exits.
 
-## P5 hardware-free integration checks
+## Hardware-free integration checks
 
 From a built and sourced ROS workspace:
 
@@ -311,24 +398,63 @@ python3 -m pytest \
   src/depalletizing_pick_place/test/test_ros_dry_run.py -v -rs
 ```
 
-The configuration checks compare required P5 declarations with the shipped
+The configuration checks compare required main-node parameters with the shipped
 `depalletizing.yaml` and check that the launch file names that configuration.
-The repository currently has no `lab_params.yaml`, so a comparison against the
-lab configuration still requires that file from P6.
+The lab pose measurements are stored in that file; there is no separate
+`lab_params.yaml` in the repository.
 
-The ROS dry run uses the official P1 `FakePTPActionServer`, the actual robot
-and gripper clients, P4 primitives, P2 waypoint executor and P5 workflow/main
-node. Unique remapped endpoints isolate it from the hardware services. It checks
-startup without motion, rejection before homing and two full consecutive runs
-including transport and gripper command ordering.
+The ROS dry run uses `FakePTPActionServer`, the actual robot and gripper clients,
+pick/place primitives, the waypoint executor and the workflow/main node.
+Unique remapped endpoints isolate it from hardware services. It checks startup
+without motion, rejection before homing and two full consecutive runs including
+transport, feedback and gripper command ordering.
 
-The gripper service in this test is explicitly a temporary TEST-ONLY stand-in.
-P3's official fake gripper service and the specified timeout cleanup are not
-present in the current repository. These tests do not certify that missing
-integration or exercise a physical grasp. Replace the stand-in with P3's fake
-when available, then verify timeout recovery and late replies as well.
+The gripper endpoint in this particular test remains a lightweight test-only
+stand-in. The packaged `FakeGripperService` is now available for simulation,
+but this test has not yet been switched to it. These checks do not verify a
+physical grasp.
 
-Current P3 implementation retains `_pending` after timeout and only cancels the
-timer. Its `test_timeout_locks_client` explicitly expects that behavior; this
-must be reconciled with the M2 requirement to clear `_pending` and destroy the
-timer. P5 does not silently modify that component's recovery policy.
+The gripper client now releases `_pending` and destroys its timer on timeout.
+Responses and timer callbacks are associated with their originating command,
+so a late reply cannot complete or overwrite a newer command. Regression tests
+in `test/test_gripper_client.py` cover timeout cleanup and ignored late replies.
+
+## Interactive lab tool and milestone validation
+
+`m2_lab_test` provides three modes:
+
+```bash
+# With robot bringup running: read pick/place poses and offer to save them.
+ros2 run depalletizing_pick_place m2_lab_test measure
+
+# With the configured main node running: test operations individually.
+ros2 run depalletizing_pick_place m2_lab_test run
+
+# With the configured main node running: execute the complete demo.
+ros2 run depalletizing_pick_place m2_lab_test demo
+```
+
+`measure` reads `/dobot_pose_raw`, converts position values from metres to
+millimetres and updates the YAML only after confirmation. It keeps a backup in
+`~/.ros/depalletizing.yaml.bak`. Run it from the workspace root to update the
+source config, or supply `--config PATH`. Restart the main node afterward so
+the measured configuration is loaded.
+
+`run` steps through homing confirmation, gripper commands, manual pick/place
+and a complete workflow. `demo` prints the movement plan, configures a raised
+transport midpoint, opens the gripper and starts the complete sequence. It
+clears the transport waypoint parameter afterward. Completion is reported from
+the main node's operation logs. In `run` and `demo`, Ctrl+C during an operation
+attempts to request cancellation through `/cancel_depalletizing`.
+
+Homing must have been performed manually before confirming it; the tool's
+confirmation does not execute or measure homing. The computed transport
+midpoint is bounded by `workspace_z_max`, but does not perform collision
+planning. Review the displayed path against the actual setup.
+
+Milestone 2 (Basic Functionality and Simulation) was completed in the lab using
+this tool: the robot picked up an object at a known pose and placed it at a
+predefined pose. The same workflow can be exercised without hardware using
+the included robot action server and gripper service. Re-measure poses when
+the physical setup changes; the committed lab coordinates describe the tested
+setup rather than a universal robot configuration.
