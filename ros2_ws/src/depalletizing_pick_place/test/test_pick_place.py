@@ -556,3 +556,203 @@ def test_retreat_failure_after_release_is_not_holding():
     assert HELD_NOTE not in result.message
     assert gripper.is_active is False
     assert pick_place.holding_object is False
+
+
+def oriented_place_pose():
+    """Placement pose whose orientation differs from the pick pose."""
+    return RobotPose(x=180.0, y=-25.0, z=30.0, r=-45.0, frame_id="base_link")
+
+
+class RecordingGripper(MockGripper):
+    """Record gripper commands without treating a closed flag as a grasp."""
+
+    def __init__(self):
+        super().__init__()
+        self.commands = []
+
+    def activate_tool(self):
+        self.commands.append("close")
+        return super().activate_tool()
+
+    def deactivate_tool(self):
+        self.commands.append("open")
+        return super().deactivate_tool()
+
+
+def test_place_approach_already_has_the_target_orientation():
+    """Carry the placement angle into the approach pose before lowering."""
+    robot = MockRobot()
+    gripper = RecordingGripper()
+    gripper.is_active = True
+    pick_place = PickPlace(robot, gripper)
+    pose = oriented_place_pose()
+
+    result = pick_place.place_object(pose).result()
+
+    approach = robot.movement_history[0]
+    assert result.success is True
+    assert approach.r == pose.r
+    assert approach.x == pose.x
+    assert approach.y == pose.y
+    assert approach.z == pose.z + APPROACH_OFFSET_Z
+    assert approach.frame_id == pose.frame_id
+
+
+def test_place_vertical_moves_keep_orientation_and_use_movl():
+    """Change only height while lowering and retracting in a straight line."""
+    robot = MockRobot()
+    gripper = RecordingGripper()
+    gripper.is_active = True
+    pick_place = PickPlace(robot, gripper)
+    pose = oriented_place_pose()
+
+    result = pick_place.place_object(pose).result()
+
+    approach, lower, retract = robot.movement_history
+    assert result.success is True
+    assert robot.motion_types == [MOVJ, MOVL, MOVL]
+    for sent in (approach, lower, retract):
+        assert sent.x == pose.x
+        assert sent.y == pose.y
+        assert sent.r == pose.r
+    assert approach.z == pose.z + APPROACH_OFFSET_Z
+    assert lower.z == pose.z
+    assert retract.z == approach.z
+    assert lower.z != approach.z
+
+
+def test_place_order_is_approach_lower_release_retract():
+    """Release only after the oriented lower move and before the retract."""
+    events = []
+
+    class OrderedRobot(MockRobot):
+        def move_to(self, pose, motion_type=1):
+            events.append(("move", pose.z, pose.r, motion_type))
+            return super().move_to(pose, motion_type)
+
+    class OrderedGripper(RecordingGripper):
+        def deactivate_tool(self):
+            events.append(("open",))
+            return super().deactivate_tool()
+
+    robot = OrderedRobot()
+    gripper = OrderedGripper()
+    gripper.is_active = True
+    pick_place = PickPlace(robot, gripper)
+    pose = oriented_place_pose()
+    approach_z = pose.z + APPROACH_OFFSET_Z
+
+    result = pick_place.place_object(pose).result()
+
+    assert result.success is True
+    assert events == [
+        ("move", approach_z, pose.r, MOVJ),
+        ("move", pose.z, pose.r, MOVL),
+        ("open",),
+        ("move", approach_z, pose.r, MOVL),
+    ]
+    assert pick_place.holding_object is False
+
+
+def test_place_failure_before_release_does_not_open_or_retract():
+    """Keep the gripper closed when lowering fails before release."""
+    robot = FailOnNthRobot(fail_on_call=2)
+    gripper = RecordingGripper()
+    gripper.is_active = True
+    pick_place = PickPlace(robot, gripper)
+    pose = oriented_place_pose()
+
+    result = pick_place.place_object(pose).result()
+
+    assert result.success is False
+    assert result.error_code == "MOVE_FAILED"
+    assert HELD_NOTE in result.message
+    assert gripper.commands == []
+    assert gripper.is_active is True
+    assert pick_place.holding_object is True
+    assert robot.movement_history == [approach_of(pose)]
+    assert robot.movement_history[0].r == pose.r
+
+
+def test_place_cancel_before_release_does_not_open_or_retract():
+    """Do not release or retract when cancellation happens before release."""
+    cancelled = False
+
+    def is_cancelled():
+        return cancelled
+
+    robot = AsyncRobot()
+    gripper = RecordingGripper()
+    gripper.is_active = True
+    pick_place = PickPlace(robot, gripper, is_cancelled=is_cancelled)
+    pose = oriented_place_pose()
+
+    workflow = pick_place.place_object(pose)
+    robot.pending.set_result(OperationResult(success=True))
+    assert [call.r for call in robot.calls] == [pose.r, pose.r]
+    assert robot.motion_types == [MOVJ, MOVL]
+
+    cancelled = True
+    robot.pending.set_result(OperationResult(success=True))
+
+    result = workflow.result()
+    assert result.success is False
+    assert result.error_code == "CANCELLED"
+    assert HELD_NOTE in result.message
+    assert gripper.commands == []
+    assert gripper.is_active is True
+    assert pick_place.holding_object is True
+    assert len(robot.calls) == 2
+
+
+def test_place_cancel_after_release_skips_the_retract():
+    """Do not retract when cancellation is raised after the object is released."""
+    cancelled = False
+
+    def is_cancelled():
+        return cancelled
+
+    class ReleaseThenCancel(RecordingGripper):
+        def deactivate_tool(self):
+            result = super().deactivate_tool()
+            nonlocal cancelled
+            cancelled = True
+            return result
+
+    robot = MockRobot()
+    gripper = ReleaseThenCancel()
+    gripper.is_active = True
+    pick_place = PickPlace(robot, gripper, is_cancelled=is_cancelled)
+    pose = oriented_place_pose()
+
+    result = pick_place.place_object(pose).result()
+
+    assert result.success is False
+    assert result.error_code == "CANCELLED"
+    assert HELD_NOTE not in result.message
+    assert gripper.commands == ["open"]
+    assert gripper.is_active is False
+    assert pick_place.holding_object is False
+    assert robot.movement_history == [approach_of(pose), pose]
+    assert robot.motion_types == [MOVJ, MOVL]
+
+
+def test_failed_release_does_not_open_again_or_retract():
+    """Leave the gripper closed when the release command itself fails."""
+    robot = MockRobot()
+    gripper = RecordingGripper()
+    gripper.is_active = True
+    gripper.should_fail = True
+    pick_place = PickPlace(robot, gripper)
+    pose = oriented_place_pose()
+
+    result = pick_place.place_object(pose).result()
+
+    assert result.success is False
+    assert result.error_code == "GRIPPER_FAILED"
+    assert HELD_NOTE in result.message
+    assert gripper.commands == ["open"]
+    assert gripper.is_active is True
+    assert pick_place.holding_object is True
+    assert robot.movement_history == [approach_of(pose), pose]
+    assert robot.motion_types == [MOVJ, MOVL]
