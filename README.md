@@ -11,6 +11,10 @@ operations and running the full demo. Robot and gripper simulation servers are
 included for exercising the workflow without hardware. They simulate ROS
 interfaces and motion feedback; they do not model collisions or physical grasps.
 
+Milestone 3 (Oriented Placement into a Container) extends the hardware-free workflow with different pick and place orientations and raised transport waypoints. The default simulation configuration includes an intermediate alignment waypoint for rotating the object before placement.
+
+The oriented placement workflow has been verified using ROS integration tests and a manual simulation run. Physical validation of the M3 route remains pending. The measured hardware configuration remains unchanged.
+
 See the [pick-and-place package README](ros2_ws/src/depalletizing_pick_place/README.md)
 for services, configuration, simulation and lab-tool usage, and the
 [interfaces README](ros2_ws/src/depalletizing_interfaces/README.md) for shared
@@ -80,42 +84,110 @@ ros2 launch depalletizing_pick_place depalletizing.launch.py
 The configuration contains measured lab poses. Re-measure them when the
 physical setup changes; see `m2_lab_test measure` in the package README.
 
+
 ## Simulation without hardware
 
-Use separate sourced terminals in the same ROS environment. When using the
-named container above, open additional shells with
-`docker exec -it depalletizing_dev bash`.
+### Local workspace setup
 
-Terminal 1: main node and both packaged fake servers. This uses the separate
-`simulation.yaml`; measured hardware poses remain in `depalletizing.yaml`.
+For local development in Linux or WSL, run from the repository root:
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/dobot_ws/install/setup.bash
+cd ros2_ws
+colcon build --symlink-install
+source install/setup.bash
+```
+
+The separate Dobot workspace sourcing step is only required when the
+external dependencies are installed in a separate workspace.
+
+When using Docker, the image already contains the built workspace.
+Open additional terminals in the named container with:
+
+```bash
+docker exec -it depalletizing_dev bash
+```
+
+Use separate sourced terminals in the same ROS environment.
+
+### M3 oriented placement simulation
+
+Terminal 1: start the main node and both packaged fake servers.
 
 ```bash
 ros2 launch depalletizing_pick_place depalletizing.launch.py simulation:=true
 ```
 
-Optional model visualization from `dobot_description`:
+This loads `config/simulation.yaml`, which contains the M3 example poses:
+
+- Pick orientation: 15 degrees.
+- Place orientation: -60 degrees.
+- Three raised transport waypoints at Z = 150 mm.
+- An intermediate alignment waypoint before container approach.
+
+Measured hardware poses remain in `config/depalletizing.yaml`.
+
+Terminal 2: source the same ROS environment and workspace, then confirm
+simulated homing and explicitly start the workflow.
+
+```bash
+ros2 service call /confirm_homing std_srvs/srv/Trigger '{}'
+ros2 service call /start_depalletizing std_srvs/srv/Trigger '{}'
+```
+
+Homing confirmation does not command movement. The workflow does not
+start automatically, and start requests before homing confirmation
+are rejected.
+
+A successful workflow ends with the following main-node log:
+
+```text
+Operation completed: Pick-and-place completed successfully
+```
+
+Use the direct service calls above to execute the configured M3 route.
+
+### Optional RViz visualization
 
 ```bash
 ros2 launch depalletizing_pick_place depalletizing.launch.py simulation:=true use_rviz:=true
 ```
 
-Use one launch command, not both concurrently. RViz shows the robot description;
-in simulation its joint sliders are independent of the Cartesian fake action
-server. This is not a collision or grasp simulator.
+Use one launch command, not both concurrently. RViz shows the robot
+description; in simulation its joint sliders are independent of the
+Cartesian fake action server.
 
-Terminal 2: interactive demo, after reviewing the displayed movement plan.
+### Optional M2 interactive demo
+
+The existing M2 lab tool remains available:
 
 ```bash
 ros2 run depalletizing_pick_place m2_lab_test demo
 ```
 
-Use these fake servers instead of hardware servers on the same endpoints.
-The demo records a homing confirmation; on real hardware, perform actual homing
-before confirming. Hardware mode is the default (`simulation:=false`); it does
-not start fake servers or hardware bringup. Override the YAML with `config:=PATH`.
+The M2 demo can override the configured transport route and should
+not be used to verify the default M3 alignment sequence.
 
-The latest M2 verification and remaining physical-test evidence are documented
-in [M2 completion report](M2_COMPLETION.md).
+### Hardware separation and limitations
+
+Use fake servers instead of hardware servers on the same endpoints.
+
+Hardware mode is the default (`simulation:=false`); it does not start
+fake servers or hardware bringup. Start the real Dobot bringup
+separately and perform actual homing before confirming it.
+
+Override the YAML with `config:=PATH` when necessary.
+
+Simulation verifies ROS interfaces, command sequencing, orientation
+handling and workflow behavior. It does not verify physical collision
+clearance, grasp stability or container insertion.
+
+The latest M2 verification and remaining physical-test evidence are
+documented in the [M2 completion report](M2_COMPLETION.md).
+
+See the [pick-and-place package README](ros2_ws/src/depalletizing_pick_place/README.md)
+for the detailed M3 route, configuration and service documentation.
 
 ## Build and test
 

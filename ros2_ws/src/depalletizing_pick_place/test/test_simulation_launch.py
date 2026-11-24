@@ -39,21 +39,39 @@ def test_launch_has_no_autostart(tmp_path, simulation):
             rclpy.init(domain_id=domain)
             initialized = True
             caller = rclpy.create_node('simulation_launch_smoke_test')
+
             start = caller.create_client(Trigger, '/start_depalletizing')
-            assert start.wait_for_service(timeout_sec=15.0), log_path.read_text()
+            homing = caller.create_client(Trigger, '/confirm_homing')
+            cancel = caller.create_client(Trigger, '/cancel_depalletizing')
+            reset = caller.create_client(Trigger, '/reset_fault')
+
+            for client in (start, homing, cancel, reset):
+                assert client.wait_for_service(
+                    timeout_sec=15.0
+                ), log_path.read_text()
+
             action = ActionClient(caller, PointToPoint, '/PTP_action')
             assert action.wait_for_server(timeout_sec=3.0) == simulation, log_path.read_text()
+
             gripper = caller.create_client(GripperControl, '/dobot_gripper_service')
             assert gripper.wait_for_service(timeout_sec=1.0) == simulation, log_path.read_text()
+
             reply = start.call_async(Trigger.Request())
             rclpy.spin_until_future_complete(caller, reply, timeout_sec=5.0)
+
             assert reply.done(), log_path.read_text()
             assert not reply.result().success
             assert 'Homing' in reply.result().message
+
             time.sleep(0.1)
             logs = log_path.read_text()
-            assert 'Sending Dobot movement goal' not in logs
+
+            assert 'Sending Dobot movement goal' not in logs, logs
+            assert 'Fake PTP goal accepted' not in logs, logs
+            assert 'close (mode=' not in logs, logs
+            assert 'open (mode=' not in logs, logs
             assert process.poll() is None, logs
+
             action.destroy()
     finally:
         if process is not None and process.poll() is None:

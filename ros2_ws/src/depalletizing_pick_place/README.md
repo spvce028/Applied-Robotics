@@ -251,30 +251,111 @@ ros2 param set /fake_gripper_service mode fail
 ros2 param set /fake_gripper_service mode success
 ```
 
+
 Start the configured main node in another sourced terminal:
 
 ```bash
-ros2 launch depalletizing_pick_place depalletizing.launch.py
+ros2 launch depalletizing_pick_place depalletizing.launch.py \
+  simulation:=false \
+  config:="$(ros2 pkg prefix --share depalletizing_pick_place)/config/simulation.yaml"
 ```
 
-The commands above show separate-process startup. Alternatively, start the
-whole simulation with one launch command (do not also start the servers manually):
+The commands above show separate-process startup with manually started
+fake servers and the simulation configuration.
+
+### M3: Oriented placement simulation
+
+Alternatively, start the complete hardware-free system with a single
+launch command. Do not also start the fake servers manually.
+
+For a local workspace with the Dobot dependencies installed separately,
+run from the repository root:
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/dobot_ws/install/setup.bash
+cd ros2_ws
+colcon build --symlink-install
+source install/setup.bash
+```
+
+If the external dependencies are built in the same workspace, the
+separate Dobot workspace sourcing step is not required.
+
+In Terminal 1:
 
 ```bash
 ros2 launch depalletizing_pick_place depalletizing.launch.py simulation:=true
 ```
 
-Simulation uses `config/simulation.yaml`. Default hardware mode
-(`simulation:=false`) uses the measured `config/depalletizing.yaml` and starts
-only the main node; hardware bringup remains external. `config:=PATH` overrides
-the YAML in either mode. After startup, no motion occurs until homing is
-confirmed and an explicit command is received.
+In Terminal 2, source the same ROS environment and workspace.
+Verify the loaded orientation and transport parameters:
 
-`use_rviz:=true` optionally includes `dobot_description`'s display launch for
-the four-axis gripper model. In simulation its joint GUI visualizes manually
-selected model configurations; it is not synchronized to the Cartesian fake
-server and does not provide collision or grasp simulation. The headless launch
-is covered by automated tests; GUI rendering has not been visually verified.
+```bash
+ros2 param get /depalletizing_main_node pick_r
+ros2 param get /depalletizing_main_node place_r
+ros2 param get /depalletizing_main_node transport_waypoints
+```
+
+The default M3 simulation route is:
+
+| Position | X (mm) | Y (mm) | Z (mm) | R (deg) |
+|---|---:|---:|---:|---:|
+| Pick | 200 | 0 | 50 | 15 |
+| Raised waypoint | 200 | 0 | 150 | 15 |
+| Alignment waypoint | 200 | 0 | 150 | -60 |
+| Transport waypoint | 250 | 100 | 150 | -60 |
+| Place | 250 | 100 | 50 | -60 |
+
+All positions are expressed in the robot base frame (`base_link`).
+The object is lifted before rotating to the target orientation.
+The placement approach, lowering and retraction preserve the target
+orientation.
+
+Confirm simulated homing and explicitly start the workflow:
+
+```bash
+ros2 service call /confirm_homing std_srvs/srv/Trigger '{}'
+ros2 service call /start_depalletizing std_srvs/srv/Trigger '{}'
+```
+
+Homing confirmation does not command movement. The start response
+acknowledges acceptance, not successful completion.
+
+A successful cycle ends with the main-node log:
+
+```text
+Operation completed: Pick-and-place completed successfully
+```
+
+Use the direct service calls for the M3 simulation. The M2 lab demo
+tool can override the configured transport route.
+
+### Simulation and hardware separation
+
+Simulation mode uses `config/simulation.yaml` and starts the main node,
+the fake PTP action server and the fake gripper service.
+
+Default hardware mode (`simulation:=false`) uses the measured
+`config/depalletizing.yaml` and starts only the main node.
+Hardware bringup remains external. The `config:=PATH` argument
+overrides the YAML in either mode.
+
+After startup, no motion occurs until homing is confirmed and an
+explicit command is received.
+
+The M3 simulation poses are examples for fake servers only.
+They must not replace the measured hardware configuration.
+Simulation validates command sequencing, orientation handling and
+workflow behavior, but does not validate physical clearance,
+collision avoidance, grasp stability or container insertion.
+
+`use_rviz:=true` optionally includes `dobot_description`'s display launch
+for the four-axis gripper model. In simulation its joint GUI visualizes
+manually selected model configurations; it is not synchronized to the
+Cartesian fake server and does not provide collision or grasp simulation.
+The headless launch is covered by automated tests; GUI rendering has
+not been visually verified.
 
 ## 12. Integration
 
