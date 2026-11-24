@@ -2,6 +2,11 @@
 
 from unittest.mock import call, Mock
 
+import pytest
+
+from depalletizing_interfaces.errors import (
+    ERROR_CANCELLED, ERROR_MOVE_FAILED, ERROR_TIMEOUT,
+)
 from depalletizing_interfaces.models import OperationResult, RobotPose
 from depalletizing_interfaces.waypoints import WaypointExecutor
 from rclpy.task import Future
@@ -196,3 +201,116 @@ def test_cancellation_before_first_waypoint():
     assert result.success is False
     assert result.error_code == 'CANCELLED'
     move_to.assert_not_called()
+
+
+def make_alignment_poses(pick_r=15.0, place_r=-60.0):
+    """Create a raised route with rotation separated from translation."""
+    return [
+        RobotPose(200.0, 0.0, 150.0, pick_r),
+        RobotPose(220.0, 40.0, 150.0, pick_r),
+        RobotPose(220.0, 40.0, 150.0, place_r),
+        RobotPose(250.0, 100.0, 150.0, place_r),
+        RobotPose(250.0, 100.0, 100.0, place_r),
+    ]
+
+
+@pytest.mark.parametrize('pick_r, place_r', [
+    (15.0, -60.0), (-20.0, 40.0), (15.0, 15.0),
+])
+def test_alignment_waypoints_preserve_orientation_and_order(pick_r, place_r):
+    """Forward complete poses unchanged, waiting for each movement result."""
+    poses = make_alignment_poses(pick_r, place_r)
+    pending = [Future() for _ in poses]
+    move_to = Mock(side_effect=pending)
+    executor = WaypointExecutor(move_to)
+
+    sequence = executor.move_through_waypoints(poses)
+
+    for index, future in enumerate(pending):
+        assert not sequence.done()
+        assert move_to.call_args_list == [
+            call(pose) for pose in poses[:index + 1]
+        ]
+        for sent, expected in zip(move_to.call_args_list, poses):
+            assert sent.args[0] is expected
+        future.set_result(successful_result())
+
+    assert sequence.done()
+    assert sequence.result().success
+    assert move_to.call_args_list == [call(pose) for pose in poses]
+
+
+@pytest.mark.parametrize('error_code', [
+    ERROR_MOVE_FAILED, ERROR_TIMEOUT, ERROR_CANCELLED,
+])
+def test_alignment_failure_stops_remaining_waypoints(error_code):
+    """An unsuccessful rotation prevents departure and placement approach."""
+    poses = make_alignment_poses()
+    pending = [Future() for _ in poses]
+    move_to = Mock(side_effect=pending)
+    sequence = WaypointExecutor(move_to).move_through_waypoints(poses)
+    pending[0].set_result(successful_result())
+    pending[1].set_result(successful_result())
+    assert move_to.call_args_list == [call(pose) for pose in poses[:3]]
+
+    failure = OperationResult(False, 'Alignment failed', error_code)
+    pending[2].set_result(failure)
+
+    assert sequence.done()
+    assert sequence.result() is failure
+    assert move_to.call_args_list == [call(pose) for pose in poses[:3]]
+    assert not pending[3].done()
+    assert not pending[4].done()
+
+
+def test_cancellation_before_alignment_skips_rotation():
+    """Cancellation during arrival prevents starting the rotation."""
+    poses = make_alignment_poses()
+    pending = [Future() for _ in poses]
+    move_to = Mock(side_effect=pending)
+    cancelled = False
+    executor = WaypointExecutor(move_to, is_cancelled=lambda: cancelled)
+    sequence = executor.move_through_waypoints(poses)
+    pending[0].set_result(successful_result())
+    assert move_to.call_args_list == [call(pose) for pose in poses[:2]]
+
+    cancelled = True
+    assert not sequence.done()
+    pending[1].set_result(successful_result())
+
+    assert sequence.done()
+    assert sequence.result().error_code == ERROR_CANCELLED
+    assert move_to.call_args_list == [call(pose) for pose in poses[:2]]
+
+
+@pytest.mark.parametrize('rotation_reports_cancelled', [True, False])
+def test_cancellation_during_alignment_prevents_departure(
+    rotation_reports_cancelled,
+):
+    """Stop after active rotation, even if it succeeds after cancel is set."""
+    poses = make_alignment_poses()
+    pending = [Future() for _ in poses]
+    move_to = Mock(side_effect=pending)
+    cancelled = False
+    executor = WaypointExecutor(move_to, is_cancelled=lambda: cancelled)
+    sequence = executor.move_through_waypoints(poses)
+    pending[0].set_result(successful_result())
+    pending[1].set_result(successful_result())
+    assert move_to.call_args_list == [call(pose) for pose in poses[:3]]
+
+    cancelled = True
+    # The sequence cannot itself terminate the active physical movement.
+    assert not sequence.done()
+    assert move_to.call_count == 3
+    result = (
+        OperationResult(False, 'Rotation cancelled', ERROR_CANCELLED)
+        if rotation_reports_cancelled else successful_result()
+    )
+    pending[2].set_result(result)
+
+    assert sequence.done()
+    assert not sequence.result().success
+    assert sequence.result().error_code == ERROR_CANCELLED
+    if rotation_reports_cancelled:
+        assert sequence.result() is result
+    assert move_to.call_args_list == [call(pose) for pose in poses[:3]]
