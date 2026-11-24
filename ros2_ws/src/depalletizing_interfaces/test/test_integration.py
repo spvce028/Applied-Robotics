@@ -1,6 +1,6 @@
 
+from depalletizing_interfaces.mocks import MockGripper, MockRobot
 from depalletizing_interfaces.models import RobotPose
-from depalletizing_interfaces.mocks import MockRobot, MockGripper
 
 
 def execute_mock_pick_and_place(robot, gripper, source, target):
@@ -50,7 +50,7 @@ def test_pick_and_place_movement_failure():
     )
 
     assert result.success is False
-    assert result.error_code == "MOVE_FAILED"
+    assert result.error_code == 'MOVE_FAILED'
     assert robot.movement_history == []
     assert gripper.is_active is False
 
@@ -68,6 +68,6 @@ def test_pick_and_place_gripper_failure():
     )
 
     assert result.success is False
-    assert result.error_code == "GRIPPER_FAILED"
+    assert result.error_code == 'GRIPPER_FAILED'
     assert robot.movement_history == [source]
     assert gripper.is_active is False

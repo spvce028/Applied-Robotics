@@ -1,11 +1,10 @@
 """Tests for asynchronous sequential waypoint execution."""
 
-from unittest.mock import Mock, call
-
-from rclpy.task import Future
+from unittest.mock import call, Mock
 
 from depalletizing_interfaces.models import OperationResult, RobotPose
 from depalletizing_interfaces.waypoints import WaypointExecutor
+from rclpy.task import Future
 
 
 def make_poses():
@@ -78,8 +77,8 @@ def test_failure_stops_remaining_movements():
 
     failure = OperationResult(
         success=False,
-        message="Movement failed",
-        error_code="MOVE_FAILED",
+        message='Movement failed',
+        error_code='MOVE_FAILED',
     )
     second_movement.set_result(failure)
 
@@ -106,8 +105,8 @@ def test_cancelled_movement_stops_sequence():
 
     cancelled = OperationResult(
         success=False,
-        message="Movement cancelled",
-        error_code="CANCELLED",
+        message='Movement cancelled',
+        error_code='CANCELLED',
     )
     second_movement.set_result(cancelled)
 
@@ -133,7 +132,7 @@ def test_cancellation_before_next_waypoint():
     result = sequence_future.result()
 
     assert result.success is False
-    assert result.error_code == "CANCELLED"
+    assert result.error_code == 'CANCELLED'
     move_to.assert_called_once_with(poses[0])
 
 
@@ -142,8 +141,8 @@ def test_timeout_stops_remaining_movements():
     poses = make_poses()
     timeout = OperationResult(
         success=False,
-        message="Movement timed out",
-        error_code="TIMEOUT",
+        message='Movement timed out',
+        error_code='TIMEOUT',
     )
     move_to = Mock(return_value=completed_future(timeout))
     executor = WaypointExecutor(move_to)
@@ -158,7 +157,7 @@ def test_move_to_exception_stops_sequence():
     """Convert a movement exception into a failure result."""
     poses = make_poses()
     move_to = Mock(
-        side_effect=RuntimeError("Action client unavailable")
+        side_effect=RuntimeError('Action client unavailable')
     )
     executor = WaypointExecutor(move_to)
 
@@ -166,7 +165,7 @@ def test_move_to_exception_stops_sequence():
     result = sequence_future.result()
 
     assert result.success is False
-    assert result.error_code == "MOVE_FAILED"
+    assert result.error_code == 'MOVE_FAILED'
     move_to.assert_called_once_with(poses[0])
 
 
@@ -195,5 +194,5 @@ def test_cancellation_before_first_waypoint():
     result = sequence_future.result()
 
     assert result.success is False
-    assert result.error_code == "CANCELLED"
+    assert result.error_code == 'CANCELLED'
     move_to.assert_not_called()

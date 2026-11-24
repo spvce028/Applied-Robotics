@@ -16,7 +16,7 @@ class RobotPose:
     y: float
     z: float
     r: float
-    frame_id: str = "base_link"
+    frame_id: str = 'base_link'
 
 
 @dataclass
@@ -24,5 +24,5 @@ class OperationResult:
     """Result of a robot or gripper operation."""
 
     success: bool
-    message: str = ""
+    message: str = ''
     error_code: Optional[str] = None

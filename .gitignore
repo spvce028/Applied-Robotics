@@ -220,6 +220,8 @@ __marimo__/
 .streamlit/secrets.toml
 
 # ROS 2 / colcon generated directories
+/install/
+/log/
 ros2_ws/build/
 ros2_ws/install/
 ros2_ws/log/

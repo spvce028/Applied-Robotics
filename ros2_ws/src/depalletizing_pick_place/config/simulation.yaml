@@ -1,0 +1,27 @@
+# Example poses for fake servers only; keep measured hardware poses separate.
+depalletizing_main_node:
+  ros__parameters:
+    pick_x: 200.0
+    pick_y: 0.0
+    pick_z: 50.0
+    pick_r: 0.0
+    place_x: 250.0
+    place_y: 100.0
+    place_z: 50.0
+    place_r: -30.0
+    velocity_ratio: 0.2
+    acceleration_ratio: 0.2
+    movement_timeout: 30.0
+    approach_height: 50.0
+    transport_waypoints: []
+    gripper_service_name: /dobot_gripper_service
+    gripper_timeout: 5.0
+    keep_compressor_running: false
+    workspace_x_min: -320.0
+    workspace_x_max: 320.0
+    workspace_y_min: -320.0
+    workspace_y_max: 320.0
+    workspace_z_min: -100.0
+    workspace_z_max: 300.0
+    workspace_r_min: -360.0
+    workspace_r_max: 360.0

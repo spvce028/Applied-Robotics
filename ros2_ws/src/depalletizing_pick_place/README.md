@@ -230,9 +230,9 @@ Run it with a `MultiThreadedExecutor` (as `main()` does). The server name, feedb
 interval and movement duration can be overridden with the `action_name`,
 `feedback_interval` and `movement_duration` node parameters.
 
-The server's unit tests exercise cancellation directly. The current ROS dry-run
-tests cover successful complete runs, not cancellation during an active action;
-end-to-end cancellation timing with this server still needs verification.
+The server uses a reentrant callback group so cancel requests can be handled
+while the simulated execute loop is active. ROS integration tests exercise
+cancellation during a movement as well as successful complete runs.
 
 For a complete hardware-free setup, run the included gripper service in a
 second sourced terminal:
@@ -257,10 +257,24 @@ Start the configured main node in another sourced terminal:
 ros2 launch depalletizing_pick_place depalletizing.launch.py
 ```
 
-The launch file currently starts only the main node; the two simulation
-servers are started separately. After startup, no motion occurs until homing
-is confirmed and an explicit manual or workflow command is received. Use the
-fake servers instead of hardware servers on these endpoints during simulation.
+The commands above show separate-process startup. Alternatively, start the
+whole simulation with one launch command (do not also start the servers manually):
+
+```bash
+ros2 launch depalletizing_pick_place depalletizing.launch.py simulation:=true
+```
+
+Simulation uses `config/simulation.yaml`. Default hardware mode
+(`simulation:=false`) uses the measured `config/depalletizing.yaml` and starts
+only the main node; hardware bringup remains external. `config:=PATH` overrides
+the YAML in either mode. After startup, no motion occurs until homing is
+confirmed and an explicit command is received.
+
+`use_rviz:=true` optionally includes `dobot_description`'s display launch for
+the four-axis gripper model. In simulation its joint GUI visualizes manually
+selected model configurations; it is not synchronized to the Cartesian fake
+server and does not provide collision or grasp simulation. The headless launch
+is covered by automated tests; GUI rendering has not been visually verified.
 
 ## 12. Integration
 
@@ -409,10 +423,16 @@ Unique remapped endpoints isolate it from hardware services. It checks startup
 without motion, rejection before homing and two full consecutive runs including
 transport, feedback and gripper command ordering.
 
-The gripper endpoint in this particular test remains a lightweight test-only
-stand-in. The packaged `FakeGripperService` is now available for simulation,
-but this test has not yet been switched to it. These checks do not verify a
-physical grasp.
+The gripper endpoint is the packaged `FakeGripperService`; no test-only service
+implementation replaces it. Additional tests cover service failure, timeout
+recovery, late replies and robot cancellation during an active action. These
+checks do not verify a physical grasp or actual standstill.
+
+The fake gripper exposes received commands through `requests` and simulated jaw
+state through `is_closed`. `service_name`, `response_delay` (default 0.2 s) and
+`no_response_delay` (default 30 s) are configurable. A timeout does not undo an
+already sent physical command; a late response is ignored by the client but
+the underlying operation can still have taken effect.
 
 The gripper client now releases `_pending` and destroys its timer on timeout.
 Responses and timer callbacks are associated with their originating command,

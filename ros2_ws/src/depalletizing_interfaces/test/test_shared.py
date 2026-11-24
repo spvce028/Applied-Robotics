@@ -1,6 +1,6 @@
 
-from depalletizing_interfaces.models import RobotPose, OperationResult
-from depalletizing_interfaces.mocks import MockRobot, MockGripper
+from depalletizing_interfaces.mocks import MockGripper, MockRobot
+from depalletizing_interfaces.models import OperationResult, RobotPose
 
 
 def test_robot_pose():
@@ -8,14 +8,14 @@ def test_robot_pose():
 
     assert pose.x == 200
     assert pose.z == 50
-    assert pose.frame_id == "base_link"
+    assert pose.frame_id == 'base_link'
 
 
 def test_operation_result():
-    result = OperationResult(True, "Success")
+    result = OperationResult(True, 'Success')
 
     assert result.success is True
-    assert result.message == "Success"
+    assert result.message == 'Success'
     assert result.error_code is None
 
 
@@ -37,7 +37,7 @@ def test_robot_movement_failure():
     result = robot.move_to(RobotPose(200, 0, 50, 0))
 
     assert result.success is False
-    assert result.error_code == "MOVE_FAILED"
+    assert result.error_code == 'MOVE_FAILED'
     assert robot.current_pose is None
     assert robot.movement_history == []
 
@@ -68,5 +68,5 @@ def test_gripper_failure():
     result = gripper.activate_tool()
 
     assert result.success is False
-    assert result.error_code == "GRIPPER_FAILED"
+    assert result.error_code == 'GRIPPER_FAILED'
     assert gripper.is_active is False

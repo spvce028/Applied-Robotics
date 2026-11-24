@@ -18,6 +18,7 @@ import time
 
 from dobot_msgs.action import PointToPoint
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
+from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.clock import Clock, ClockType
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
@@ -82,6 +83,8 @@ class FakePTPActionServer(Node):
         self._lock = threading.Lock()
         self._current_pose = list(start_pose or [0.0, 0.0, 0.0, 0.0])
         self._active = None
+        # Cancellation must run while the blocking simulated execute loop runs.
+        self._action_group = ReentrantCallbackGroup()
 
         self._action_server = ActionServer(
             self,
@@ -90,6 +93,7 @@ class FakePTPActionServer(Node):
             execute_callback=self.execute_callback,
             goal_callback=self.goal_callback,
             cancel_callback=self.cancel_callback,
+            callback_group=self._action_group,
         )
         self.get_logger().info(
             f"Fake PTP action server ready on '{action_name}'."

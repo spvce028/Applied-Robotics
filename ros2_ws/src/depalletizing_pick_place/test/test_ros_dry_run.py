@@ -1,8 +1,4 @@
-"""Hardware-free ROS dry run using the official P1 server and real clients.
-
-The gripper endpoint below is a TEST-ONLY stand-in until P3 supplies its official
-fake service. This suite does not claim final P1/P3 simulation acceptance.
-"""
+"""Hardware-free ROS integration using packaged fake servers and real clients."""
 
 import threading
 import time
@@ -17,12 +13,12 @@ pytest.importorskip('dobot_msgs.action')
 yaml = pytest.importorskip('yaml')
 
 import rclpy
-from dobot_msgs.srv import GripperControl
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.parameter import Parameter
 from std_srvs.srv import Trigger
 
 from depalletizing_pick_place.fake_ptp_action_server import FakePTPActionServer
+from depalletizing_pick_place.fake_gripper_service import FakeGripperService
 from depalletizing_pick_place.main_node import DepalletizingMainNode
 
 
@@ -38,7 +34,7 @@ def wait_for(predicate, timeout=10.0):
 
 @pytest.fixture
 def ros_dry_run():
-    """Run actual P5/P4/P1/P3 clients against isolated simulated endpoints."""
+    """Run actual clients and workflow against isolated packaged fake servers."""
     prefix = '/p5_dry_run_' + uuid.uuid4().hex
     service_names = [
         '/PTP_action', '/start_depalletizing', '/confirm_homing',
@@ -53,25 +49,16 @@ def ros_dry_run():
     executor = MultiThreadedExecutor(num_threads=6)
     nodes = []
     thread = None
-    requests = []
     try:
         server = FakePTPActionServer(
             movement_duration=0.04, feedback_interval=0.005,
         )
         nodes.append(server)
-        gripper_node = rclpy.create_node('p5_test_only_gripper')
-        nodes.append(gripper_node)
-
-        def gripper_reply(request, response):
-            requests.append((
-                request.gripper_state, request.keep_compressor_running,
-            ))
-            response.success = True
-            response.message = 'Test-only gripper command completed'
-            return response
-
         gripper_name = prefix + '/gripper'
-        gripper_node.create_service(GripperControl, gripper_name, gripper_reply)
+        gripper_node = FakeGripperService(
+            service_name=gripper_name, response_delay=0.01, no_response_delay=0.3,
+        )
+        nodes.append(gripper_node)
         config_file = Path(__file__).resolve().parents[1] / 'config/depalletizing.yaml'
         config = yaml.safe_load(config_file.read_text(encoding='utf-8'))
         values = config['depalletizing_main_node']['ros__parameters']
@@ -101,7 +88,7 @@ def ros_dry_run():
             finally:
                 caller.destroy_client(client)
 
-        yield node, server, requests, call, values
+        yield node, server, gripper_node, call, values
     finally:
         # This test runs spin() on another thread: never spin the executor here.
         if len(nodes) >= 3:
@@ -123,7 +110,7 @@ def ros_dry_run():
 
 def test_dry_run_refuses_start_without_homing(ros_dry_run):
     """Start the real node without commanding motion and reject an unhomed run."""
-    node, server, requests, call, _ = ros_dry_run
+    node, server, gripper, call, _ = ros_dry_run
     before = server.current_pose
     assert not node._homing_confirmed
     assert not node.robot.is_busy
@@ -132,12 +119,12 @@ def test_dry_run_refuses_start_without_homing(ros_dry_run):
     assert not reply.success
     assert 'Homing' in reply.message
     assert server.current_pose == before
-    assert requests == []
+    assert gripper.requests == []
 
 
 def test_two_complete_runs_with_real_clients(ros_dry_run):
     """Exercise actual action/service messages, transport and repeatability."""
-    node, server, requests, call, values = ros_dry_run
+    node, server, gripper, call, values = ros_dry_run
     assert call('/confirm_homing').success
     feedback_samples = []
     real_feedback_callback = node.robot._feedback_callback
@@ -158,7 +145,7 @@ def test_two_complete_runs_with_real_clients(ros_dry_run):
             assert node.workflow.status == 'completed'
             assert not node.robot.is_busy
             assert not node.pick_place.holding_object
-            assert requests == [
+            assert gripper.requests == [
                 ('close', values['keep_compressor_running']),
                 ('open', values['keep_compressor_running']),
             ] * (run + 1)
@@ -168,3 +155,55 @@ def test_two_complete_runs_with_real_clients(ros_dry_run):
             ])
             assert len(feedback_samples) > samples_before
             assert node.robot.last_feedback is None
+            assert not gripper.is_closed
+
+
+def test_real_action_cancellation_stops_workflow(ros_dry_run):
+    """Process cancel concurrently with the packaged fake server's execute loop."""
+    node, server, gripper, call, _ = ros_dry_run
+    server.movement_duration = 0.5
+    assert call('/confirm_homing').success
+    assert call('/start_depalletizing').success
+    wait_for(lambda: node.robot.is_busy)
+    assert call('/cancel_depalletizing').success
+    wait_for(lambda: not node._workflow_running and not node.robot.is_busy)
+    assert node.workflow.status == 'cancelled'
+    assert gripper.requests == []
+
+
+def test_official_gripper_timeout_recovery(ros_dry_run):
+    """Exercise timeout cleanup, retry and a late reply over real ROS services."""
+    node, _, gripper, call, _ = ros_dry_run
+    node.gripper.timeout_sec = 0.05
+    gripper.set_parameters([Parameter('mode', value='no_response')])
+    assert call('/confirm_homing').success
+    assert call('/manual/close_gripper').success
+    wait_for(lambda: not node._workflow_running)
+    assert node.gripper._pending is None
+    assert node.gripper._timer is None
+    # Keep an observer of the timed-out client's response; it must stay TIMEOUT.
+    gripper.set_parameters([Parameter('mode', value='success')])
+    assert call('/manual/open_gripper').success
+    wait_for(lambda: not node._workflow_running)
+    assert node.gripper._pending is None
+    assert not node.pick_place.holding_object
+    # Allow the first request's delayed response to reach the client.
+    threading.Event().wait(0.35)
+    assert node.gripper._pending is None
+    assert node.gripper._timer is None
+    assert not node.pick_place.holding_object
+    assert gripper.requests == [('close', False), ('open', False)]
+
+
+def test_official_gripper_rejection_stops_pick(ros_dry_run):
+    """A real fake-service failure stops the workflow before transport/place."""
+    node, _, gripper, call, _ = ros_dry_run
+    gripper.set_parameters([Parameter('mode', value='fail')])
+    assert call('/confirm_homing').success
+    assert call('/start_depalletizing').success
+    wait_for(lambda: not node._workflow_running)
+    assert node.workflow.status == 'failed'
+    assert gripper.requests == [('close', False)]
+    assert not node.pick_place.holding_object
+    assert node.gripper._pending is None
+    assert node.gripper._timer is None

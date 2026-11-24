@@ -15,6 +15,9 @@
   <depend>std_srvs</depend>
   <depend>std_msgs</depend>
   <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>dobot_description</exec_depend>
 
   <test_depend>python3-pytest</test_depend>
   <test_depend>python3-yaml</test_depend>

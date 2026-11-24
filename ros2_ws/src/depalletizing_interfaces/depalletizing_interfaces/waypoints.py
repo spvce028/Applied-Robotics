@@ -36,7 +36,7 @@ class WaypointExecutor:
             return self._completed_future(result)
 
         raise TypeError(
-            "move_to() must return Future or OperationResult."
+            'move_to() must return Future or OperationResult.'
         )
 
     def move_through_waypoints(
@@ -60,7 +60,7 @@ class WaypointExecutor:
 
                 if not isinstance(result, OperationResult):
                     raise TypeError(
-                        "Movement Future must contain OperationResult."
+                        'Movement Future must contain OperationResult.'
                     )
 
                 if not result.success:
@@ -74,8 +74,8 @@ class WaypointExecutor:
                     OperationResult(
                         success=False,
                         message=(
-                            "Waypoint movement failed: "
-                            f"{exc}"
+                            'Waypoint movement failed: '
+                            f'{exc}'
                         ),
                         error_code=ERROR_MOVE_FAILED,
                     )
@@ -90,7 +90,7 @@ class WaypointExecutor:
                     finish(
                         OperationResult(
                             success=False,
-                            message="Waypoint sequence cancelled",
+                            message='Waypoint sequence cancelled',
                             error_code=ERROR_CANCELLED,
                         )
                     )
@@ -100,7 +100,7 @@ class WaypointExecutor:
                 finish(
                     OperationResult(
                         success=False,
-                        message=f"Cancellation check failed: {exc}",
+                        message=f'Cancellation check failed: {exc}',
                         error_code=ERROR_WORKFLOW_ERROR,
                     )
                 )
@@ -113,7 +113,7 @@ class WaypointExecutor:
                 finish(
                     OperationResult(
                         success=True,
-                        message="Waypoint sequence completed",
+                        message='Waypoint sequence completed',
                     )
                 )
                 return
@@ -122,7 +122,7 @@ class WaypointExecutor:
                 finish(
                     OperationResult(
                         success=False,
-                        message=f"Could not read next waypoint: {exc}",
+                        message=f'Could not read next waypoint: {exc}',
                         error_code=ERROR_WORKFLOW_ERROR,
                     )
                 )
@@ -140,8 +140,8 @@ class WaypointExecutor:
                     OperationResult(
                         success=False,
                         message=(
-                            "Could not start waypoint movement: "
-                            f"{exc}"
+                            'Could not start waypoint movement: '
+                            f'{exc}'
                         ),
                         error_code=ERROR_MOVE_FAILED,
                     )

@@ -2,7 +2,7 @@
 """Mock robot and gripper implementations for hardware-free testing."""
 
 from .errors import ERROR_GRIPPER_FAILED, ERROR_MOVE_FAILED
-from .models import RobotPose, OperationResult
+from .models import OperationResult, RobotPose
 
 
 class MockRobot:
@@ -20,7 +20,7 @@ class MockRobot:
         if self.should_fail:
             return OperationResult(
                 success=False,
-                message="Simulated robot movement failure",
+                message='Simulated robot movement failure',
                 error_code=ERROR_MOVE_FAILED
             )
 
@@ -30,7 +30,7 @@ class MockRobot:
 
         return OperationResult(
             success=True,
-            message="Mock robot reached target"
+            message='Mock robot reached target'
         )
 
 
@@ -47,7 +47,7 @@ class MockGripper:
         if self.should_fail:
             return OperationResult(
                 success=False,
-                message="Simulated gripper activation failure",
+                message='Simulated gripper activation failure',
                 error_code=ERROR_GRIPPER_FAILED
             )
 
@@ -55,7 +55,7 @@ class MockGripper:
 
         return OperationResult(
             success=True,
-            message="Mock gripper activated"
+            message='Mock gripper activated'
         )
 
     def deactivate_tool(self) -> OperationResult:
@@ -63,7 +63,7 @@ class MockGripper:
         if self.should_fail:
             return OperationResult(
                 success=False,
-                message="Simulated gripper deactivation failure",
+                message='Simulated gripper deactivation failure',
                 error_code=ERROR_GRIPPER_FAILED
             )
 
@@ -71,5 +71,5 @@ class MockGripper:
 
         return OperationResult(
             success=True,
-            message="Mock gripper deactivated"
+            message='Mock gripper deactivated'
         )

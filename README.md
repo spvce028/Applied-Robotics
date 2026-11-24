@@ -86,25 +86,24 @@ Use separate sourced terminals in the same ROS environment. When using the
 named container above, open additional shells with
 `docker exec -it depalletizing_dev bash`.
 
-Terminal 1: simulated robot action server.
+Terminal 1: main node and both packaged fake servers. This uses the separate
+`simulation.yaml`; measured hardware poses remain in `depalletizing.yaml`.
 
 ```bash
-ros2 run depalletizing_pick_place fake_ptp_action_server
+ros2 launch depalletizing_pick_place depalletizing.launch.py simulation:=true
 ```
 
-Terminal 2: simulated gripper service.
+Optional model visualization from `dobot_description`:
 
 ```bash
-ros2 run depalletizing_pick_place fake_gripper_service
+ros2 launch depalletizing_pick_place depalletizing.launch.py simulation:=true use_rviz:=true
 ```
 
-Terminal 3: configured main node.
+Use one launch command, not both concurrently. RViz shows the robot description;
+in simulation its joint sliders are independent of the Cartesian fake action
+server. This is not a collision or grasp simulator.
 
-```bash
-ros2 launch depalletizing_pick_place depalletizing.launch.py
-```
-
-Terminal 4: interactive demo, after reviewing the displayed movement plan.
+Terminal 2: interactive demo, after reviewing the displayed movement plan.
 
 ```bash
 ros2 run depalletizing_pick_place m2_lab_test demo
@@ -112,8 +111,11 @@ ros2 run depalletizing_pick_place m2_lab_test demo
 
 Use these fake servers instead of hardware servers on the same endpoints.
 The demo records a homing confirmation; on real hardware, perform actual homing
-before confirming. The launch file does not yet select simulation/hardware mode
-or start a visualization automatically.
+before confirming. Hardware mode is the default (`simulation:=false`); it does
+not start fake servers or hardware bringup. Override the YAML with `config:=PATH`.
+
+The latest M2 verification and remaining physical-test evidence are documented
+in [M2 completion report](M2_COMPLETION.md).
 
 ## Build and test
 

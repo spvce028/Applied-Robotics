@@ -98,7 +98,7 @@ class FakeActionServer:
 
     def __init__(
         self, node, action_type, action_name,
-        execute_callback=None, goal_callback=None, cancel_callback=None,
+        execute_callback=None, goal_callback=None, cancel_callback=None, **kwargs,
     ):
         self.node = node
         self.action_name = action_name
@@ -142,6 +142,9 @@ class FakeGoalHandle:
 
 def _install_stubs():
     """Install the minimal ROS surface needed to import the fake server."""
+    groups = _module('rclpy.callback_groups')
+    if not hasattr(groups, 'ReentrantCallbackGroup'):
+        groups.ReentrantCallbackGroup = type('ReentrantCallbackGroup', (), {})
     clock_module = _module("rclpy.clock")
     if not hasattr(clock_module, "ClockType"):
         clock_module.ClockType = SimpleNamespace(STEADY_TIME=2)

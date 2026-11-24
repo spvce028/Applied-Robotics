@@ -1,11 +1,9 @@
 """Tests for waypoint transport between picking and placing."""
 
-import pytest
-
-from rclpy.task import Future
-
 from depalletizing_interfaces.models import OperationResult, RobotPose
 from depalletizing_interfaces.workflow import PickAndPlaceWorkflow
+import pytest
+from rclpy.task import Future
 
 
 def test_transport_runs_between_pick_and_place():
