@@ -14,6 +14,7 @@ yaml = pytest.importorskip('yaml')
 
 import rclpy
 from rclpy.executors import MultiThreadedExecutor
+from rclpy.action import GoalResponse
 from rclpy.parameter import Parameter
 from std_srvs.srv import Trigger
 
@@ -49,17 +50,49 @@ def ros_dry_run():
     executor = MultiThreadedExecutor(num_threads=6)
     nodes = []
     thread = None
+    command_log = []
+    observation_lock = threading.Lock()
+
+    class ObservedPTPServer(FakePTPActionServer):
+        """Observe received goals without replacing the packaged server logic."""
+
+        @property
+        def observed_commands(self):
+            with observation_lock:
+                return list(command_log)
+
+        def goal_callback(self, goal_request):
+            response = super().goal_callback(goal_request)
+            if response == GoalResponse.ACCEPT:
+                with observation_lock:
+                    command_log.append((
+                        'move', tuple(goal_request.target_pose),
+                        goal_request.motion_type,
+                    ))
+            return response
+
+    class ObservedGripperService(FakeGripperService):
+        """Observe completed gripper commands using the real fake-service body."""
+
+        def handle_request(self, request, response):
+            response = super().handle_request(request, response)
+            if response.success:
+                with observation_lock:
+                    command_log.append(('gripper', request.gripper_state))
+            return response
+
     try:
-        server = FakePTPActionServer(
+        server = ObservedPTPServer(
             movement_duration=0.04, feedback_interval=0.005,
         )
         nodes.append(server)
         gripper_name = prefix + '/gripper'
-        gripper_node = FakeGripperService(
+        gripper_node = ObservedGripperService(
             service_name=gripper_name, response_delay=0.01, no_response_delay=0.3,
         )
         nodes.append(gripper_node)
-        config_file = Path(__file__).resolve().parents[1] / 'config/depalletizing.yaml'
+        # Integration scenarios must not depend on measured hardware coordinates.
+        config_file = Path(__file__).resolve().parents[1] / 'config/simulation.yaml'
         config = yaml.safe_load(config_file.read_text(encoding='utf-8'))
         values = config['depalletizing_main_node']['ros__parameters']
         values['gripper_service_name'] = gripper_name
@@ -207,3 +240,85 @@ def test_official_gripper_rejection_stops_pick(ros_dry_run):
     assert not node.pick_place.holding_object
     assert node.gripper._pending is None
     assert node.gripper._timer is None
+
+
+def configure_oriented_placement(node):
+    """Use explicit simulation poses and rotate at a separate raised waypoint."""
+    values = {
+        'pick_x': 200.0, 'pick_y': 0.0, 'pick_z': 50.0, 'pick_r': 15.0,
+        'place_x': 250.0, 'place_y': 100.0, 'place_z': 50.0, 'place_r': -60.0,
+        'transport_waypoints': [
+            200.0, 0.0, 150.0, 15.0,    # Raise before changing orientation.
+            200.0, 0.0, 150.0, -60.0,   # Align at fixed x/y/z.
+            250.0, 100.0, 150.0, -60.0, # Transport already aligned.
+        ],
+    }
+    results = node.set_parameters([
+        Parameter(name, value=value) for name, value in values.items()
+    ])
+    assert all(result.successful for result in results)
+    return [
+        ('move', (200.0, 0.0, 100.0, 15.0), 1),
+        ('move', (200.0, 0.0, 50.0, 15.0), 2),
+        ('gripper', 'close'),
+        ('move', (200.0, 0.0, 100.0, 15.0), 2),
+        ('move', (200.0, 0.0, 150.0, 15.0), 2),
+        ('move', (200.0, 0.0, 150.0, -60.0), 2),
+        ('move', (250.0, 100.0, 150.0, -60.0), 2),
+        ('move', (250.0, 100.0, 100.0, -60.0), 1),
+        ('move', (250.0, 100.0, 50.0, -60.0), 2),
+        ('gripper', 'open'),
+        ('move', (250.0, 100.0, 100.0, -60.0), 2),
+    ]
+
+
+def test_m3_oriented_placement_two_complete_cycles(ros_dry_run):
+    """Verify actual server-received commands, angles and release order twice."""
+    node, server, gripper, call, values = ros_dry_run
+    expected = configure_oriented_placement(node)
+    assert server.observed_commands == []
+    assert call('/confirm_homing').success
+    for cycle in range(2):
+        assert call('/start_depalletizing').success
+        # The operation is still active when acknowledgement reaches the caller.
+        assert node._workflow_running
+        for service in (
+            '/start_depalletizing', '/manual/pick', '/manual/place',
+            '/manual/open_gripper', '/manual/close_gripper',
+        ):
+            assert not call(service).success
+        wait_for(lambda: not node._workflow_running and not node.robot.is_busy)
+        assert node.workflow.status == 'completed'
+        assert server.observed_commands == expected * (cycle + 1)
+        assert server.current_pose == pytest.approx([250.0, 100.0, 100.0, -60.0])
+        assert gripper.requests == [
+            ('close', values['keep_compressor_running']),
+            ('open', values['keep_compressor_running']),
+        ] * (cycle + 1)
+        assert not gripper.is_closed
+        assert not node.pick_place.holding_object
+
+
+def test_m3_cancel_during_alignment_prevents_placement(ros_dry_run):
+    """Cancel the rotation action itself, leaving later transport/place unstarted."""
+    node, server, gripper, call, values = ros_dry_run
+    expected = configure_oriented_placement(node)
+    # Allow time to issue a real cancel while the alignment action is active.
+    server.movement_duration = 0.3
+    assert call('/confirm_homing').success
+    assert call('/start_depalletizing').success
+    alignment = ('move', (200.0, 0.0, 150.0, -60.0), 2)
+    wait_for(lambda: alignment in server.observed_commands)
+    assert node.workflow.status == 'transporting'
+    assert node.robot.is_busy
+    assert node.pick_place.holding_object
+    assert gripper.is_closed
+    assert call('/cancel_depalletizing').success
+    # Wait for terminal action handling, not merely cancellation acknowledgement.
+    wait_for(lambda: not node._workflow_running and not node.robot.is_busy)
+    assert node.workflow.status == 'cancelled'
+    assert server.observed_commands == expected[:6]
+    assert gripper.requests == [('close', values['keep_compressor_running'])]
+    assert gripper.is_closed
+    assert node.pick_place.holding_object
+    assert node._cancel_requested.is_set()

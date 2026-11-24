@@ -423,6 +423,45 @@ Unique remapped endpoints isolate it from hardware services. It checks startup
 without motion, rejection before homing and two full consecutive runs including
 transport, feedback and gripper command ordering.
 
+### Oriented-placement integration (Milestone 3)
+
+The ROS integration fixture reads `simulation.yaml`, keeping automated tests
+independent of measured hardware coordinates. Its observers subclass the
+packaged fake servers and delegate to their real handlers; the production
+clients, waypoint executor, pick/place primitives and workflow are not replaced.
+Observers record the accepted movement goals and completed gripper commands
+in one ordered log.
+
+The oriented-placement scenario uses a pick angle of `15` degrees and a place
+angle of `-60` degrees. The explicit route first raises the object to `z=150`
+with the pick orientation, then changes orientation at fixed x/y/z, and finally
+transports it to the destination while preserving the place angle. Place
+approach, lowering and retraction all retain that target orientation.
+
+`test_m3_oriented_placement_two_complete_cycles` checks the exact command log
+for two consecutive cycles, including positions, angles, motion types, gripper
+order, final pose and released holding state. Concurrent workflow/manual
+requests are rejected while the oriented cycle is active.
+
+`test_m3_cancel_during_alignment_prevents_placement` issues a real action
+cancellation after the rotation goal reaches the fake server. It waits until
+the workflow ends and the driver releases its active-goal lock, then verifies
+that no later transport or place goal was received and the simulated gripper
+remains closed.
+
+Run the integration checks from the built and sourced ROS workspace:
+
+```bash
+python3 -m pytest src/depalletizing_pick_place/test/test_ros_dry_run.py -v -rs
+```
+
+Verification on 24 November 2026: **7 integration tests passed, none skipped**,
+including both oriented-placement scenarios. The existing workflow supports
+the route through configuration; no additional production rotation logic was
+needed. These results establish software sequencing only. Physical grip
+stability, swept clearance, container fit and the M3 hardware acceptance must
+still be verified in the lab.
+
 The gripper endpoint is the packaged `FakeGripperService`; no test-only service
 implementation replaces it. Additional tests cover service failure, timeout
 recovery, late replies and robot cancellation during an active action. These
