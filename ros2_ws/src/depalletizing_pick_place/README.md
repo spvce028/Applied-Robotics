@@ -554,6 +554,23 @@ state through `is_closed`. `service_name`, `response_delay` (default 0.2 s) and
 already sent physical command; a late response is ignored by the client but
 the underlying operation can still have taken effect.
 
+To reuse the fake in a ROS test, instantiate it directly and spin it in a
+`MultiThreadedExecutor` so delayed replies do not block other callbacks:
+
+```python
+gripper = FakeGripperService(
+    service_name='/test/gripper', response_delay=0.01, no_response_delay=0.3,
+)
+executor.add_node(gripper)
+gripper.set_parameters([Parameter('mode', value='fail')])
+assert gripper.requests == [('close', False)]  # every received command, in order
+```
+
+`mode`, `response_delay` and `no_response_delay` are read per request, so they
+can be changed between commands. `service_name` is only read at construction.
+Observers can subclass the fake and extend `handle_request`, as
+`ObservedGripperService` in `test/test_ros_dry_run.py` does.
+
 The gripper client now releases `_pending` and destroys its timer on timeout.
 Responses and timer callbacks are associated with their originating command,
 so a late reply cannot complete or overwrite a newer command. Regression tests
