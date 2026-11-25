@@ -242,6 +242,50 @@ def test_official_gripper_rejection_stops_pick(ros_dry_run):
     assert node.gripper._timer is None
 
 
+def test_official_gripper_delayed_reply_within_timeout(ros_dry_run):
+    """A delayed reply inside the timeout completes the command normaly."""
+    node, _, gripper, _, _ = ros_dry_run
+    client = node.gripper
+    client.timeout_sec = 1.0
+    gripper.set_parameters([Parameter('response_delay', value=0.2)])
+    start = time.monotonic()
+    future = client.activate_tool()
+    wait_for(future.done)
+    assert future.result().success
+    assert time.monotonic() - start >= 0.2
+    assert gripper.is_closed
+    assert client._pending is None
+    assert client._timer is None
+    assert gripper.requests == [('close', False)]
+
+
+def test_official_gripper_late_reply_cannot_finish_newer_request(ros_dry_run):
+    """A late success for a timed-out command must not complete a pending one."""
+    node, _, gripper, _, _ = ros_dry_run
+    client = node.gripper
+    client.timeout_sec = 0.05
+    gripper.set_parameters([Parameter('mode', value='no_response')])
+    old = client.activate_tool()
+    wait_for(old.done)
+    assert old.result().error_code == 'TIMEOUT'
+
+    gripper.set_parameters([
+        Parameter('mode', value='fail'), Parameter('response_delay', value=0.6),
+    ])
+    client.timeout_sec = 2.0
+    new = client.deactivate_tool()
+    wait_for(lambda: gripper.is_closed)
+    threading.Event().wait(0.05)
+    assert not new.done()
+
+    wait_for(new.done)
+    assert new.result().error_code == 'GRIPPER_FAILED'
+    assert old.result().error_code == 'TIMEOUT'
+    assert client._pending is None
+    assert client._timer is None
+    assert gripper.requests == [('close', False), ('open', False)]
+
+
 def configure_oriented_placement(node):
     """Use explicit simulation poses and rotate at a separate raised waypoint."""
     values = {

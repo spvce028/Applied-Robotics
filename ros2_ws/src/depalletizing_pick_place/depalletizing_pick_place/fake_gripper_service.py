@@ -51,7 +51,7 @@ class FakeGripperService(Node):
             return self._is_closed
 
     def handle_request(self, request, response):
-        """Reply according to the configured mode and record valid commands."""
+        """Record the command, then reply according to the mode."""
         mode = self.get_parameter("mode").value
         with self._state_lock:
             self._requests.append((request.gripper_state, request.keep_compressor_running))
