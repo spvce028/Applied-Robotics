@@ -98,6 +98,21 @@ future.add_done_callback(on_done)
 `motion_type` is passed straight to the action goal (1 = joint-interpolated
 Cartesian, 2 = linear Cartesian, 4/5 = joint coordinates).
 
+### Rotation contract (M3)
+
+`RobotPose.r` is the tool rotation in **degrees** in the default `base_link`
+frame. The driver passes `r` unchanged to element 4 of `target_pose` for both
+MOVJ and MOVL; it does not normalise angles or choose a shortest rotation
+path. The default workspace limits accept `-360.0 <= r <= 360.0`
+(inclusive). Non-finite values and values outside the configured limits are
+rejected before a goal is sent with `OUT_OF_WORKSPACE`. Any future wrapping
+or shortest-path behaviour requires an explicit new contract and tests.
+
+Physical rotation direction, grip stability, loaded clearance and successful
+insertion are **not** proved by simulation or by the software rotation tests.
+They must be measured and recorded on the real robot before M3 can be
+accepted.
+
 ## 5. Result and Error Codes
 
 Every code path resolves the future with an `OperationResult`:

@@ -12,6 +12,7 @@ import types
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import pytest
 from rclpy.task import Future
 
 
@@ -142,6 +143,10 @@ from depalletizing_pick_place.robot_driver import (  # noqa: E402
 # The driver keeps direct references to the imported classes, so the stub
 # modules can be removed again to keep other test modules isolated.
 _remove_created_stubs()
+
+
+MOVJ = 1
+MOVL = 2
 
 
 def pose():
@@ -276,6 +281,70 @@ def test_move_to_sends_configured_goal():
     assert goal.acceleration_ratio == 0.3
     assert node.timers[0].period == 12.0
     assert driver.is_busy is True
+
+
+@pytest.mark.parametrize('motion_type', [MOVJ, MOVL])
+@pytest.mark.parametrize('rotation', [0.0, 90.0, -45.0, 360.0, -360.0])
+def test_move_to_forwards_rotation_unchanged(motion_type, rotation):
+    """Send the requested r value unchanged for MOVJ and MOVL goals."""
+    driver, _, client = make_driver()
+    target = RobotPose(x=123.0, y=-7.5, z=42.0, r=rotation)
+
+    driver.move_to(target, motion_type=motion_type)
+
+    assert len(client.goals) == 1
+    goal = client.goals[0]
+    assert goal.motion_type == motion_type
+    assert list(goal.target_pose) == [123.0, -7.5, 42.0, rotation]
+
+
+@pytest.mark.parametrize('rotation', [-90.0, 90.0])
+def test_configured_rotation_boundaries_are_accepted(rotation):
+    """Accept inclusive r limits from a custom WorkspaceLimits object."""
+    driver, _, client = make_driver(
+        workspace_limits=WorkspaceLimits(r=(-90.0, 90.0)),
+    )
+
+    future = driver.move_to(RobotPose(10.0, 20.0, 30.0, rotation))
+
+    assert not future.done()
+    assert list(client.goals[0].target_pose)[3] == rotation
+
+
+@pytest.mark.parametrize(
+    ('limits', 'rotation'),
+    [
+        (WorkspaceLimits(r=(-90.0, 90.0)), -90.01),
+        (WorkspaceLimits(r=(-90.0, 90.0)), 90.01),
+        (WorkspaceLimits(), -360.01),
+        (WorkspaceLimits(), 360.01),
+    ],
+)
+def test_out_of_range_rotation_is_rejected_without_sending_a_goal(
+    limits, rotation,
+):
+    """Reject r outside configured limits before contacting the server."""
+    driver, _, client = make_driver(workspace_limits=limits)
+
+    future = driver.move_to(RobotPose(10.0, 20.0, 30.0, rotation))
+
+    assert future.done() is True
+    assert future.result().error_code == robot_driver.ERROR_OUT_OF_WORKSPACE
+    assert client.goals == []
+
+
+@pytest.mark.parametrize(
+    'rotation', [float('nan'), float('inf'), float('-inf')],
+)
+def test_non_finite_rotation_is_rejected_without_sending_a_goal(rotation):
+    """Reject non-finite r values without sending a movement goal."""
+    driver, _, client = make_driver()
+
+    future = driver.move_to(RobotPose(10.0, 20.0, 30.0, rotation))
+
+    assert future.done() is True
+    assert future.result().error_code == robot_driver.ERROR_OUT_OF_WORKSPACE
+    assert client.goals == []
 
 
 def test_action_server_name_is_configurable():
@@ -587,7 +656,8 @@ def test_driver_uses_shared_error_codes():
     assert robot_driver.ERROR_FAULTED == shared_errors.ERROR_FAULTED
     assert robot_driver.ERROR_SERVER_UNAVAILABLE == \
         shared_errors.ERROR_SERVER_UNAVAILABLE
-    assert robot_driver.ERROR_GOAL_REJECTED == shared_errors.ERROR_GOAL_REJECTED
+    assert robot_driver.ERROR_GOAL_REJECTED == \
+        shared_errors.ERROR_GOAL_REJECTED
     assert robot_driver.ERROR_TIMEOUT == shared_errors.ERROR_TIMEOUT
     assert robot_driver.ERROR_CANCELLED == shared_errors.ERROR_CANCELLED
     assert robot_driver.ERROR_MOVE_FAILED == shared_errors.ERROR_MOVE_FAILED
