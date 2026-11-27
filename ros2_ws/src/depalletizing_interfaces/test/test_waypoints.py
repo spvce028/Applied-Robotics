@@ -2,13 +2,12 @@
 
 from unittest.mock import call, Mock
 
-import pytest
-
 from depalletizing_interfaces.errors import (
     ERROR_CANCELLED, ERROR_MOVE_FAILED, ERROR_TIMEOUT,
 )
 from depalletizing_interfaces.models import OperationResult, RobotPose
 from depalletizing_interfaces.waypoints import WaypointExecutor
+import pytest
 from rclpy.task import Future
 
 

@@ -9,7 +9,7 @@ import yaml
 
 CONFIG_PATH = (
     Path(__file__).resolve().parents[1]
-    / 'config' / 'm3_alignment_simulation.yaml'
+    / 'config' / 'alignment_simulation.yaml'
 )
 
 
