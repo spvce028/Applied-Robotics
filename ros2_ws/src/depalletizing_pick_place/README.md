@@ -593,6 +593,70 @@ in `test/test_gripper_client.py` cover timeout cleanup and ignored late replies.
 
 ## Interactive lab tool and milestone validation
 
+### M3 operator test and trial report
+
+The existing `m2_lab_test` is unchanged. Use the additional `m3_lab_test` for
+oriented placement trials. Start and source the configured main node separately;
+this tool does not launch servers or select the main node's configuration.
+
+```bash
+# Terminal 1: complete simulation with the M3 example configuration.
+ros2 launch depalletizing_pick_place depalletizing.launch.py simulation:=true
+
+# Terminal 2: explicitly label these as simulated results.
+ros2 run depalletizing_pick_place m3_lab_test --simulation --cycles 2
+```
+
+For hardware, first perform real homing and review the measured hardware route,
+then start the main node in hardware mode. In a second sourced terminal:
+
+```bash
+ros2 run depalletizing_pick_place m3_lab_test --cycles 10 \
+  --revision "$(git rev-parse HEAD)" --output m3_results/hardware_trials.json
+```
+
+The hardware YAML must contain measured pick/place orientations and a nonempty
+transport route with a dedicated rotation at fixed XYZ above both approach
+poses. After alignment, all transport waypoints must retain the place angle.
+The script rejects an empty route or invalid values before sending commands.
+It does not copy simulation coordinates, write YAML or alter ROS parameters.
+Restart the main node after changing construction-time component settings.
+
+The script prints the actual loaded movement plan and requests these explicit
+confirmations: `REVIEWED`, object/container descriptions, `HOMED` (or
+`SIMULATED`), `OPEN`, then `START` for each trial. Opening can release an object;
+it is never an automatic recovery step. Anything other than `START` stops the
+trial series. Use one operator tool at a time: completion is observed through
+the main node's operation logs, which do not carry per-request identifiers.
+
+After each successful hardware cycle, answer `y`, `n` or `u` (unknown) for
+pickup, alignment before lowering, grip stability, clearance, container fit and
+release, and absence of manual intervention. A physical pass requires `y` for
+every criterion. Unknown observations are not counted as success. In simulation,
+physical observations and the physical success rate remain unverified (`null`).
+
+Timeout, operation failure or Ctrl+C stops further trials. When a command may
+be active, the CLI requests `/cancel_depalletizing` and briefly waits for a
+completion log. It never force-resets faults or resumes automatically; inspect
+the robot/main-node state and actual standstill before recovery. A cancellation
+acknowledgement or a software completion log is not physical standstill proof.
+
+The JSON report contains mode, revision, configuration snapshot, setup
+descriptions, individual responses/results, observations, notes and success
+counts. It is saved incrementally and on interruption. Requests interrupted
+before their acceptance could be recorded are listed as unconfirmed, not
+successful. Without `--output`, a new timestamped file is created under
+`m3_results/`; existing report files are never overwritten.
+
+Automated checks for the new tool:
+
+```bash
+python3 -m pytest src/depalletizing_pick_place/test/test_m3_lab_test.py \
+  src/depalletizing_pick_place/test/test_m3_lab_ros.py -v -rs
+```
+
+### Existing M2 operator tool
+
 `m2_lab_test` provides three modes:
 
 ```bash
